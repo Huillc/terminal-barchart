@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niveles Gamma → TradingView (puente)
 // @namespace    terminal-barchart
-// @version      1.0
+// @version      1.1
 // @description  Calcula flip, muro, imán y max pain de DIA/QQQ/GLD desde Barchart (mapa Semana = igual a Barchart, y Estructural 1–45 días), los convierte a tu CFD y los dibuja solos en TradingView. Funciona en PC y en Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -269,8 +269,11 @@
     const data = gmGet('ng_data', null);
     if (!etf || !data || !data.items[etf] || data.items[etf].error) return;
     const it = data.items[etf];
-    if (!it.ratio) return;
-    const k = it.ratio, dec = it.dec;
+    // v1.1: si el gráfico ES el ETF (QQQ, DIA, GLD de cualquier bolsa) los niveles van tal cual;
+    // si es el CFD/índice, se convierten con la relación en vivo CFD/ETF.
+    const esEtf = String(sym).split(':').pop().toUpperCase() === etf;
+    if (!esEtf && !it.ratio) return;
+    const k = esEtf ? 1 : it.ratio, dec = esEtf ? 2 : it.dec;
     const lineas = [];
     const add = (strike, tipo, mapaN, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, mapaN, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
     const s = it.semana || {}, e = it.estructural || {};
