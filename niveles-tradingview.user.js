@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.5
+// @version      3.6
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -407,9 +407,17 @@
       const oiHoy = H.oi && H.oi.length ? H.oi[0] : null, oiN = est(H.oi && H.oi.length > 1 ? H.oi.slice(1) : null);
       o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
       // v2.9: actividad inusual y flujo grande también en su propio cuadrito
-      const tile = (n, v, d) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad'}</b><i>${d}</i></span>`;
-      if (O.inus) o += O.inus.n ? tile('Actividad inusual', vIn, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'}${quien(O.inus.k4, sube)}${notaPoco(aI)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
-      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vFl, `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))}${quien(O.flujo.k4, sube)}${notaPoco(aF)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
+      const tile = (n, v, d, lab) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${lab || (v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad')}</b><i>${d}</i></span>`;
+      // v3.6: el veredicto del cuadrito sigue la INTERPRETACIÓN (igual que la lectura general):
+      // apuestas a favor del precio = a favor · apuestas en contra = divergencia · sin apuestas o poco dinero = lo lleva el precio (la toma de ganancias no es apuesta en contra)
+      const dirP = V ? V.lado : (sube ? 1 : -1);
+      const interp = (vv, a) => { const P = dirP > 0 ? 'Alcista' : 'Bajista';
+        if (!vv) return [dirP, `${P} · lo lleva el precio`];
+        if (vv === dirP) return [dirP, `${P}${a && a.tg > Math.max(a.alc, a.baj) ? ' con freno' : ''}`];
+        return [vv, `${vv > 0 ? 'Alcista' : 'Bajista'} · divergencia`]; };
+      const tI = interp(vIn, aI), tF = interp(vFl, aF);
+      if (O.inus) o += O.inus.n ? tile('Actividad inusual', tI[0], `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'}${quien(O.inus.k4, sube)}${notaPoco(aI)}`, tI[1]) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
+      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', tF[0], `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))}${quien(O.flujo.k4, sube)}${notaPoco(aF)}`, tF[1]) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
       o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto, según si se compró o vendió. Flujo: mismo filtro que la página de Barchart (&gt; $20 k, vence en &lt; 10 días, tamaño &gt; 50); neto ±30 % = señal.</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
