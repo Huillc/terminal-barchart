@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.1
+// @version      2.2
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -456,10 +456,16 @@
     const firma = sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
     if (!forzar && firma === ultimaFirma) return;
 
-    // borrar SOLO las líneas que dibujó este script en este símbolo
+    // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
+    // porque TradingView cambia el id interno al recargar el gráfico guardado y así quedaban líneas viejas duplicadas.
     const ids = idsGuardados();
-    const existentes = new Set((ch.getAllShapes() || []).map((x) => String(x.id)));
-    for (const id of ids[sym] || []) { if (existentes.has(String(id))) { try { ch.removeEntity(id); } catch (err) {} } }
+    const MIA = /^(S·|E·|MAXPAIN )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
+    for (const x of ch.getAllShapes() || []) {
+      if (x.name !== 'horizontal_line') continue;
+      let txt = '';
+      try { const o = ch.getShapeById(x.id); txt = (o.getProperties() || {}).text || ''; } catch (err) {}
+      if (MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
+    }
     const nuevos = [];
     for (const l of lineas) {
       try {
