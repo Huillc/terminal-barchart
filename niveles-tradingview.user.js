@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.2
+// @version      2.3
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -196,16 +196,19 @@
         gmSet('ng_eod', eod);
       }
       // 5 min de QQQ de hoy (para la entrada de contexto) — solo desde las 10:30 NY y una vez
-      let barras = gmGet('ng_qqq5', null);
-      if (t.min >= 630 && t.min < 960 && (!barras || barras.dia !== t.dia || (!barras.completo && t.min >= 632))) {
-        try {
-          const L = await serie('/proxies/timeseries/historical/queryminutes.ashx', { symbol: 'QQQ', interval: 5, maxrecords: 200, order: 'asc', volume: 'contract', dividends: 'false', backadjust: 'false' });
-          const b = L.filter((c) => c.length >= 7 && c[0].startsWith(t.dia)).map((c) => ({ hm: c[0].slice(11, 16), o: +c[2], h: +c[3], l: +c[4], c: +c[5], v: +c[6] }));
-          barras = { dia: t.dia, b, completo: b.some((x) => x.hm >= '10:25') };
-          gmSet('ng_qqq5', barras);
-        } catch (e) {}
+      // v2.3: velas de 5 min de DIA, QQQ y GLD en sesión (VWAP de la fila de lectura + contexto 10:30)
+      let b5 = gmGet('ng_b5', null);
+      if (!b5 || b5.dia !== t.dia) b5 = { dia: t.dia, s: {} };
+      if (t.min >= 575 && t.min < 965 && !/Sat|Sun/.test(t.sem)) {
+        for (const sym of ['QQQ', 'DIA', 'GLD']) {
+          try {
+            const L = await serie('/proxies/timeseries/historical/queryminutes.ashx', { symbol: sym, interval: 5, maxrecords: 100, order: 'desc', volume: 'contract', dividends: 'false', backadjust: 'false' });
+            b5.s[sym] = L.filter((c) => c.length >= 7 && c[0].startsWith(t.dia) && c[0].slice(11, 16) >= '09:30').map((c) => ({ hm: c[0].slice(11, 16), o: +c[2], h: +c[3], l: +c[4], c: +c[5], v: +c[6] })).sort((a, b) => a.hm < b.hm ? -1 : 1);
+          } catch (e) {}
+        }
+        gmSet('ng_b5', b5);
       }
-      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, barras: barras && barras.dia === t.dia ? barras.b : [] };
+      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, b5: b5.s, barras: b5.s.QQQ || [] };
       gmSet('ng_dia', dd);
       return dd;
     }
@@ -255,6 +258,40 @@
       const d = Math.sign(b.c / a.o - 1); if (!d) return { estado: 'primera hora plana' };
       const ent = c.o * it.ratio;
       return { señal: true, d, ent, sl: ent - d * 100, tp: ent + d * 200, risk: 100 };
+    }
+
+    // ── FILA DE LECTURA (v2.3): VWAP · noticias · próximo dato · VIX — lo primero que se mira ──
+    function vwapDe(b) {
+      if (!b || !b.length) return null; let pv = 0, vv = 0; for (const x of b) { pv += (x.h + x.l + x.c) / 3 * (x.v || 1); vv += (x.v || 1); }
+      const vw = pv / vv, u = b[b.length - 1].c, lado = Math.sign(u - vw);
+      let desde = b[b.length - 1].hm; pv = 0; vv = 0; const lados = [];
+      for (const x of b) { pv += (x.h + x.l + x.c) / 3 * (x.v || 1); vv += (x.v || 1); lados.push([x.hm, Math.sign(x.c - pv / vv)]); }
+      for (let j = lados.length - 1; j >= 0 && lados[j][1] === lado; j--) desde = lados[j][0];
+      return { vw, u, lado, pct: (u / vw - 1) * 100, desde };
+    }
+    function textoTerminal() { try { const t = document.getElementById('tbc-host'); return t && t.shadowRoot ? t.shadowRoot.textContent.replace(/\s+/g, ' ') : ''; } catch (e) { return ''; } }
+    function noticias(nombre) {
+      const m = new RegExp(nombre + '\\s*·\\s*score noticias\\s*([+−-]?\\d+)\\s*\\((\\w+)\\)').exec(textoTerminal());
+      return m ? { score: +m[1].replace('−', '-'), tono: m[2] } : null;
+    }
+    function proximoDato() {
+      const t = textoTerminal(), i = t.indexOf('Datos de hoy (hora Lima):'); if (i < 0) return null;
+      const seg = t.slice(i + 25, i + 600), ahora = new Date().toLocaleTimeString('en-GB', { timeZone: 'America/Lima', hour: '2-digit', minute: '2-digit' });
+      const re = /(\d{2}:\d{2})\s+([^●]+?)\s*(●+)/g; let m, prox = null;
+      while ((m = re.exec(seg))) { if (m[1] > ahora && !prox) prox = { h: m[1], n: m[2].trim(), imp: m[3].length }; }
+      if (!prox) return { fin: true };
+      const [hh, mm] = prox.h.split(':').map(Number), [ah, am] = ahora.split(':').map(Number); prox.faltan = hh * 60 + mm - (ah * 60 + am);
+      return prox;
+    }
+    function filaLectura(sym, it, dd) {
+      const V = vwapDe((dd.b5 || {})[sym]), N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
+      const t = (c, a, b) => `<span class="ft ${c}"><small>${a}</small>${b}</span>`;
+      let h = '<div class="fila">';
+      const ult = V ? +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? ny().min - ult : 0;
+      h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
+      h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}`) : t('fn', 'Noticias', 'FALTA');
+      if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
+      return h + '</div>';
     }
 
     // ── 4) ESCENARIOS (EN PRUEBA): niveles clave + objetivo 200 pts o el siguiente nivel ──
@@ -348,15 +385,19 @@
         .esc{margin:4px 0;padding:5px 7px;background:#0b1118;border-left:3px solid #4c8fe0;border-radius:4px;font-size:12.5px}
         .niv{font-size:12px;color:#9fb3c8;margin-top:4px}.niv span{display:inline-block;margin:1px 8px 1px 0}
         .pr{font-size:10.5px;padding:1px 5px;border-radius:4px;background:#2a2110;color:#ffb84d;margin-left:4px}.ok{background:#0c2a1b;color:#7dffb5}
+        .fila{display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 6px}
+        .ft{display:inline-flex;flex-direction:column;padding:4px 9px;border-radius:7px;border:1px solid #2a3340;background:#0b1118;font-weight:800;font-size:13px;line-height:1.2}
+        .ft small{font-size:10px;font-weight:600;color:#8b9bb0;text-transform:uppercase;letter-spacing:.05em}.ft i{font-style:normal;font-weight:500;font-size:10.5px;color:#9fb3c8}
+        .fu{border-color:#2fbf71;color:#5dffa5;background:#0c2a1b}.fd{border-color:#e5485a;color:#ff8a96;background:#2a1015}.fa{border-color:#ffb84d;color:#ffd08a;background:#2a2110}.fn{color:#c9d6e3}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
-      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span><span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
+      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
       if (abierto && data && dd) {
         const cap = gmGet('ng_capital', null);
         h += '<div class="g">';
         for (const sym of Object.keys(ACTIVOS)) {
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
-          h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>`;
+          h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>` + filaLectura(sym, it, dd);
           if (E && E.modo) h += `<div><span class="modo ${E.modo === 'AMPLIO' ? 'ru' : 're'}">DÍA ${E.modo}</span> <span class="m">${E.modo === 'AMPLIO' ? 'gamma − (bajo el flip): días más amplios · no comprar caídas ni vender subidas por "barato/caro"' : 'gamma + (sobre el flip): días más frenados · el muro NO es freno (se rompe más que un nivel cualquiera)'}</span>${sym !== 'GLD' ? '<span class="pr ok">rango probado</span>' : '<span class="pr">sin efecto en oro</span>'}</div>`;
           // señales probadas
           if (sym === 'QQQ') {
