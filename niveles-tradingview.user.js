@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.8
+// @version      2.9
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -355,7 +355,11 @@
         return `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : 'Equilibrado'}</b><i>${hoy.toFixed(2)} · normal ${normal.toFixed(2)}</i></span>`; };
       const oiHoy = H.oi && H.oi.length ? H.oi[0] : null, oiN = est(H.oi && H.oi.length > 1 ? H.oi.slice(1) : null);
       o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
-      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Los dos P/C (borde punteado) se comparan con el normal de 20 días de ${it.nombre}: si se alejan 1 desvío marcan Alcista/Bajista (lectura "miedo = bajista", pendiente de probar). No suman al conteo porque el P/C volumen ya está dentro de "Opciones" y el P/C OI cambia una sola vez al día.</div>`;
+      // v2.9: actividad inusual y flujo grande también en su propio cuadrito
+      const tile = (n, v, d) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad'}</b><i>${d}</i></span>`;
+      if (O.inus) o += O.inus.n ? tile('Actividad inusual', O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0, `${O.inus.n} contratos · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
+      if (O.flujo) o += O.flujo.n >= 8 ? tile('Flujo grande', O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, `${O.flujo.n} ops · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`) : `<span class="tc tcx fn"><small>Flujo grande</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops &gt; $100 k</i></span>`;
+      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto. Flujo: operaciones &gt; $100 k según el lado (ask/bid).</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
     }
