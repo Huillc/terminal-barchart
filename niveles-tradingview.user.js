@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.3
+// @version      2.4
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -124,7 +124,7 @@
       let all = [];
       for (let pg = 1; pg <= 12; pg++) {
         const j = await api('/proxies/core-api/v1/options/get', {
-          symbol: sym, fields: 'strikePrice,optionType,openInterest,gamma,volatility,expirationDate',
+          symbol: sym, fields: 'strikePrice,optionType,openInterest,gamma,volatility,expirationDate,volume,lastPrice',
           orderBy: 'daysToExpiration', orderDir: 'asc', limit: 1000, page: pg, raw: 1,
         });
         const d = (j.data || []).map((x) => x.raw || x);
@@ -162,12 +162,34 @@
           const semV = ex.slice(0, 4);
           const estV = ex.filter((v) => dte(v, hoy) <= DIAS_ESTR && dte(v, hoy) >= 1);
           const vCerca = ex[0], vMens = ex.find((v) => esMensual(v));
+          // v2.4: lectura de opciones del día (contexto, NO probado) — sale de la misma cadena, sin pedidos extra
+          const opc = { pcVol: null, pcOI: null, inus: null, flujo: null };
+          try {
+            const sum = (L, k) => L.reduce((t, x) => t + (x[k] || 0), 0);
+            const cer = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= 3);
+            const cv = sum(cer.filter((x) => x.optionType === 'Call'), 'volume'), pv = sum(cer.filter((x) => x.optionType === 'Put'), 'volume');
+            opc.pcVol = cv ? pv / cv : null;
+            const est = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= DIAS_ESTR);
+            const co = sum(est.filter((x) => x.optionType === 'Call'), 'openInterest'), po = sum(est.filter((x) => x.optionType === 'Put'), 'openInterest');
+            opc.pcOI = co ? po / co : null;
+            const inu = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= 14 && (x.volume || 0) >= 500 && (x.volume || 0) >= 1.25 * (x.openInterest || 0));
+            const prem = (L) => L.reduce((t, x) => t + (x.volume || 0) * (x.lastPrice || 0) * 100, 0);
+            const ic = prem(inu.filter((x) => x.optionType === 'Call')), ip = prem(inu.filter((x) => x.optionType === 'Put'));
+            opc.inus = { n: inu.length, calls: ic, puts: ip };
+            if (mercadoAbierto()) {
+              const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,side,premium,tradeTime', raw: 1, limit: 300, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,100000)': '' });
+              const F = (fj.data || []).map((x) => x.raw || x).filter((o) => new Date(o.tradeTime * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === hoy);
+              let alc = 0, baj = 0; for (const o of F) { const c = o.symbolType === 'Call', ask = o.side === 'ask', bid = o.side === 'bid'; if ((c && ask) || (!c && bid)) alc += o.premium; else if ((!c && ask) || (c && bid)) baj += o.premium; }
+              opc.flujo = { n: F.length, alc, baj };
+            }
+          } catch (e) {}
           const a = ACTIVOS[sym], cReal = cfd[a.cfd], cIdx = spot[a.idx];
           const c = cReal || cIdx || null;
           items[sym] = {
             spot: S, cfdSym: a.cfd, nombre: a.nombre, dec: a.dec,
             cfd: c, fuenteCfd: cReal ? 'CFD OANDA' : (cIdx ? 'índice ' + a.idx + ' (aprox.)' : null),
             ratio: c ? c / S : null,
+            opc,
             semana: mapa(ch.filter((x) => semV.includes(x.expirationDate)), S, hoy),
             estructural: mapa(ch.filter((x) => estV.includes(x.expirationDate)), S, hoy),
             maxPain: {
@@ -291,7 +313,18 @@
       h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}`) : t('fn', 'Noticias', 'FALTA');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
-      return h + '</div>';
+      h += '</div>';
+      // segunda fila: opciones del día (contexto NO probado: el detector de catalizador midió 29 % en vivo)
+      const O = it.opc || {}, M = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' : Math.round(v / 1e3) + ' k';
+      const E = (dd.eod || {})[sym] || [], hoyE = E.length && E[E.length - 1].d === ny().dia, c1 = E[E.length - (hoyE ? 2 : 1)], c2 = E[E.length - (hoyE ? 3 : 2)];
+      const g = (c, a, b) => `<span class="fo ${c}">${a} <b>${b}</b></span>`, pc = (r, inv) => r == null ? 'fn' : (inv ? (r < 0.8 ? 'fu' : r > 1.2 ? 'fd' : 'fn') : 'fn');
+      let o = '<div class="fila2"><span class="m">Opciones · contexto, no probado:</span>';
+      if (O.flujo) o += O.flujo.n < 8 ? g('fn', 'Flujo grande', `${O.flujo.n} ops · insuficiente`) : g(O.flujo.alc > 1.5 * O.flujo.baj ? 'fu' : O.flujo.baj > 1.5 * O.flujo.alc ? 'fd' : 'fn', 'Flujo grande', `${O.flujo.n} ops · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`);
+      if (O.pcVol != null) o += g(pc(O.pcVol, true), 'P/C vol (≤3 d)', O.pcVol.toFixed(2));
+      if (O.pcOI != null) o += g(pc(O.pcOI, true), 'P/C OI', O.pcOI.toFixed(2));
+      if (O.inus) o += O.inus.n ? g(O.inus.calls > 2 * O.inus.puts ? 'fu' : O.inus.puts > 2 * O.inus.calls ? 'fd' : 'fn', 'Inusual', `${O.inus.n} · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}`) : g('fn', 'Inusual', 'nada');
+      if (c1 && c2) { const r = (c1.c / c2.c - 1) * 100; o += g(r > 0.3 ? 'fu' : r < -0.3 ? 'fd' : 'fn', 'Ayer', (r > 0 ? '+' : '') + r.toFixed(2) + ' %'); }
+      return h + o + '</div>';
     }
 
     // ── 4) ESCENARIOS (EN PRUEBA): niveles clave + objetivo 200 pts o el siguiente nivel ──
@@ -389,6 +422,8 @@
         .ft{display:inline-flex;flex-direction:column;padding:4px 9px;border-radius:7px;border:1px solid #2a3340;background:#0b1118;font-weight:800;font-size:13px;line-height:1.2}
         .ft small{font-size:10px;font-weight:600;color:#8b9bb0;text-transform:uppercase;letter-spacing:.05em}.ft i{font-style:normal;font-weight:500;font-size:10.5px;color:#9fb3c8}
         .fu{border-color:#2fbf71;color:#5dffa5;background:#0c2a1b}.fd{border-color:#e5485a;color:#ff8a96;background:#2a1015}.fa{border-color:#ffb84d;color:#ffd08a;background:#2a2110}.fn{color:#c9d6e3}
+        .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
+        .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
       </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
       if (abierto && data && dd) {
