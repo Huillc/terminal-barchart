@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.5
+// @version      2.6
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -157,7 +157,7 @@
         const S = spot[sym];
         if (!(S > 0)) { items[sym] = { error: 'sin precio de ' + sym }; continue; }
         try {
-          const ch = await cadena(sym, hoy);
+          let ch; try { ch = await cadena(sym, hoy); } catch (e1) { await dormir(4000); ch = await cadena(sym, hoy); }   // v2.6: un reintento
           const ex = [...new Set(ch.map((x) => x.expirationDate))].sort().filter((v) => dte(v, hoy) >= minD);
           const semV = ex.slice(0, 4);
           const estV = ex.filter((v) => dte(v, hoy) <= DIAS_ESTR && dte(v, hoy) >= 1);
@@ -197,7 +197,7 @@
               mensual: vMens ? { venc: vMens, strike: maxPain(ch.filter((x) => x.expirationDate === vMens), S) } : null,
             },
           };
-        } catch (e) { items[sym] = { error: String(e.message || e) }; }
+        } catch (e) { const prev = (gmGet('ng_data', null) || { items: {} }).items[sym]; items[sym] = prev && !prev.error ? Object.assign({}, prev, { viejo: prev.viejo || (gmGet('ng_data', null) || {}).hora || '?' }) : { error: 'Barchart no respondió (' + String(e.message || e) + ') · se reintenta solo en 5 min' }; }
       }
       const data = { t: Date.now(), hora: horaLima(), items };
       gmSet('ng_data', data);
@@ -294,7 +294,9 @@
     function textoTerminal() { try { const t = document.getElementById('tbc-host'); return t && t.shadowRoot ? t.shadowRoot.textContent.replace(/\s+/g, ' ') : ''; } catch (e) { return ''; } }
     function noticias(nombre) {
       const m = new RegExp(nombre + '\\s*·\\s*score noticias\\s*([+−-]?\\d+)\\s*\\((\\w+)\\)').exec(textoTerminal());
-      return m ? { score: +m[1].replace('−', '-'), tono: m[2] } : null;
+      const k = 'ng_news_' + nombre;
+      if (m) { const v = { score: +m[1].replace('−', '-'), tono: m[2], t: Date.now() }; gmSet(k, v); return v; }
+      const c = gmGet(k, null); return c && Date.now() - c.t < 30 * 60e3 ? Object.assign({}, c, { cache: Math.round((Date.now() - c.t) / 60e3) }) : null;
     }
     function proximoDato() {
       const t = textoTerminal(), i = t.indexOf('Datos de hoy (hora Lima):'); if (i < 0) return null;
@@ -311,7 +313,7 @@
       let h = '<div class="fila">';
       const ult = V ? +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? ny().min - ult : 0;
       h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
-      h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}`) : t('fn', 'Noticias', 'FALTA');
+      h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}${N.cache ? `<i>leído hace ${N.cache} min</i>` : ''}`) : t('fn', 'Noticias', 'FALTA<i>abre el terminal general</i>');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
       h += '</div>';
       // segunda fila (v2.5): cada dato con su veredicto ALCISTA / BAJISTA / EQUILIBRADO y un conteo simple (no probado)
@@ -441,7 +443,7 @@
         for (const sym of Object.keys(ACTIVOS)) {
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
-          h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>` + filaLectura(sym, it, dd);
+          h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}${it.viejo ? ` <small class="am" style="font-size:10.5px">⚠ gamma de las ${it.viejo} (Barchart no respondió; reintenta solo)</small>` : ''}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>` + filaLectura(sym, it, dd);
           if (E && E.modo) h += `<div><span class="modo ${E.modo === 'AMPLIO' ? 'ru' : 're'}">DÍA ${E.modo}</span> <span class="m">${E.modo === 'AMPLIO' ? 'gamma − (bajo el flip): días más amplios · no comprar caídas ni vender subidas por "barato/caro"' : 'gamma + (sobre el flip): días más frenados · el muro NO es freno (se rompe más que un nivel cualquiera)'}</span>${sym !== 'GLD' ? '<span class="pr ok">rango probado</span>' : '<span class="pr">sin efecto en oro</span>'}</div>`;
           // señales probadas
           if (sym === 'QQQ') {
