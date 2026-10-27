@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.3
+// @version      3.4
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -488,6 +488,13 @@
     }
     function pintar(estado) {
       const abierto = gmGet('ng_abierto', true), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null), F = fase();
+      // v3.4: plegado = botón chico abajo a la izquierda, para no tapar el menú de Barchart
+      host.style.cssText = abierto ? 'position:fixed;left:0;right:0;top:0;z-index:2147483646;' : 'position:fixed;left:10px;bottom:10px;z-index:2147483646;';
+      if (!abierto) {
+        sh.innerHTML = `<style>:host{all:initial}button{font:600 13px system-ui,Segoe UI,Arial,sans-serif;background:#0b1520;color:#cfe1ff;border:1px solid #3b5878;border-radius:999px;padding:7px 14px;cursor:pointer;box-shadow:0 2px 10px #000a}button:hover{background:#13263a}</style><button id="tg" title="${F.n}">📋 Plan del Día ▾</button><button id="ac" style="display:none"></button>`;
+        sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', true); pintar(); };
+        return;
+      }
       let h = `<style>
         :host{all:initial}
         .b{font:13px/1.4 system-ui,Segoe UI,Arial,sans-serif;background:#070b10f2;color:#d8dee9;border-bottom:2px solid #2b3b4e;padding:8px 12px;max-height:72vh;overflow:auto}
