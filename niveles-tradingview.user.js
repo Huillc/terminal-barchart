@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.4
+// @version      2.5
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -314,16 +314,21 @@
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}`) : t('fn', 'Noticias', 'FALTA');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
       h += '</div>';
-      // segunda fila: opciones del día (contexto NO probado: el detector de catalizador midió 29 % en vivo)
+      // segunda fila (v2.5): cada dato con su veredicto ALCISTA / BAJISTA / EQUILIBRADO y un conteo simple (no probado)
       const O = it.opc || {}, M = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' : Math.round(v / 1e3) + ' k';
       const E = (dd.eod || {})[sym] || [], hoyE = E.length && E[E.length - 1].d === ny().dia, c1 = E[E.length - (hoyE ? 2 : 1)], c2 = E[E.length - (hoyE ? 3 : 2)];
-      const g = (c, a, b) => `<span class="fo ${c}">${a} <b>${b}</b></span>`, pc = (r, inv) => r == null ? 'fn' : (inv ? (r < 0.8 ? 'fu' : r > 1.2 ? 'fd' : 'fn') : 'fn');
-      let o = '<div class="fila2"><span class="m">Opciones · contexto, no probado:</span>';
-      if (O.flujo) o += O.flujo.n < 8 ? g('fn', 'Flujo grande', `${O.flujo.n} ops · insuficiente`) : g(O.flujo.alc > 1.5 * O.flujo.baj ? 'fu' : O.flujo.baj > 1.5 * O.flujo.alc ? 'fd' : 'fn', 'Flujo grande', `${O.flujo.n} ops · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`);
-      if (O.pcVol != null) o += g(pc(O.pcVol, true), 'P/C vol (≤3 d)', O.pcVol.toFixed(2));
-      if (O.pcOI != null) o += g(pc(O.pcOI, true), 'P/C OI', O.pcOI.toFixed(2));
-      if (O.inus) o += O.inus.n ? g(O.inus.calls > 2 * O.inus.puts ? 'fu' : O.inus.puts > 2 * O.inus.calls ? 'fd' : 'fn', 'Inusual', `${O.inus.n} · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}`) : g('fn', 'Inusual', 'nada');
-      if (c1 && c2) { const r = (c1.c / c2.c - 1) * 100; o += g(r > 0.3 ? 'fu' : r < -0.3 ? 'fd' : 'fn', 'Ayer', (r > 0 ? '+' : '') + r.toFixed(2) + ' %'); }
+      const S = [];   // [nombre, veredicto (+1/−1/0/null), detalle]
+      if (V) S.push(['Precio vs VWAP', Math.abs(V.pct) < 0.03 ? 0 : V.lado, `${V.pct >= 0 ? '+' : ''}${V.pct.toFixed(2)} %`]);
+      if (O.flujo) S.push(['Flujo grande', O.flujo.n < 8 ? null : O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, O.flujo.n < 8 ? `solo ${O.flujo.n} ops` : `${O.flujo.n} ops · ${M(O.flujo.alc)} / ${M(O.flujo.baj)}`]);
+      if (O.pcVol != null) S.push(['P/C vol (≤3 d)', O.pcVol < 0.8 ? 1 : O.pcVol > 1.2 ? -1 : 0, O.pcVol.toFixed(2)]);
+      if (O.pcOI != null) S.push(['P/C OI', O.pcOI < 0.8 ? 1 : O.pcOI > 1.2 ? -1 : 0, O.pcOI.toFixed(2)]);
+      if (O.inus) S.push(['Inusual', O.inus.n ? (O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0) : null, O.inus.n ? `${O.inus.n} · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}` : 'sin actividad']);
+      if (c1 && c2) { const r = (c1.c / c2.c - 1) * 100; S.push(['Tendencia (ayer)', r > 0.3 ? 1 : r < -0.3 ? -1 : 0, (r > 0 ? '+' : '') + r.toFixed(2) + ' %']); }
+      const nA = S.filter((x) => x[1] === 1).length, nB = S.filter((x) => x[1] === -1).length, nE = S.length - nA - nB;
+      const cons = nA >= 4 && nB <= 1 ? ['fu', 'MAYORÍA ALCISTA'] : nB >= 4 && nA <= 1 ? ['fd', 'MAYORÍA BAJISTA'] : ['fn', 'SIN CONSENSO'];
+      let o = `<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato</span><span class="m" style="margin-left:auto">conteo simple · contexto, NO probado</span></div><div class="tabg">`;
+      for (const [n, v, d] of S) o += `<span class="tc ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Insuficiente'}</b><i>${d}</i></span>`;
+      o += '</div>';
       return h + o + '</div>';
     }
 
@@ -422,6 +427,10 @@
         .ft{display:inline-flex;flex-direction:column;padding:4px 9px;border-radius:7px;border:1px solid #2a3340;background:#0b1118;font-weight:800;font-size:13px;line-height:1.2}
         .ft small{font-size:10px;font-weight:600;color:#8b9bb0;text-transform:uppercase;letter-spacing:.05em}.ft i{font-style:normal;font-weight:500;font-size:10.5px;color:#9fb3c8}
         .fu{border-color:#2fbf71;color:#5dffa5;background:#0c2a1b}.fd{border-color:#e5485a;color:#ff8a96;background:#2a1015}.fa{border-color:#ffb84d;color:#ffd08a;background:#2a2110}.fn{color:#c9d6e3}
+        .tab{border:1px solid #1e2a36;border-radius:8px;padding:5px 7px;margin:0 0 7px;background:#0a0f15}
+        .tabh{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin-bottom:4px}.tabh b{font-size:12.5px}
+        .tabg{display:flex;gap:5px;flex-wrap:wrap}.tc{display:inline-flex;flex-direction:column;padding:3px 7px;border-radius:6px;border:1px solid #2a3340;font-size:12px;line-height:1.25;min-width:96px}
+        .tc small{font-size:9.5px;color:#8b9bb0;text-transform:uppercase;letter-spacing:.04em}.tc i{font-style:normal;font-size:10px;color:#9fb3c8}
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
