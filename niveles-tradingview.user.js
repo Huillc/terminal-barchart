@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.7
+// @version      2.8
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -349,7 +349,13 @@
       const cons = nA >= 3 && nB === 0 ? ['fu', 'MAYORÍA ALCISTA'] : nB >= 3 && nA === 0 ? ['fd', 'MAYORÍA BAJISTA'] : ['fn', 'SIN CONSENSO'];
       let o = `<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato · de 4 votos independientes</span><span class="m" style="margin-left:auto">consenso = 3 de 4 sin ninguno en contra · NO probado</span></div><div class="tabg">`;
       for (const [n, v, d] of S) o += `<span class="tc ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin dato'}</b><i>${d}</i></span>`;
-      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">De fondo (no vota): P/C OI ${O.pcOI != null ? O.pcOI.toFixed(2) : '—'}${ho ? ` · su normal ${ho.m.toFixed(2)}` : ''} · P/C se compara con los últimos 20 días de ${it.nombre}: ±1 desvío = señal (lectura "miedo = bajista", pendiente de probar).</div>`;
+      // v2.8: P/C volumen y P/C OI en su propio cuadrito, con veredicto frente al normal de 20 días de ESTE activo
+      const pcT = (n, hoy, normal, sd) => { if (hoy == null || !normal) return `<span class="tc fn tcx"><small>${n}</small><b>Sin dato</b></span>`;
+        const z = sd > 0 ? (hoy - normal) / sd : 0, v = z >= 1 ? -1 : z <= -1 ? 1 : 0;
+        return `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : 'Equilibrado'}</b><i>${hoy.toFixed(2)} · normal ${normal.toFixed(2)}</i></span>`; };
+      const oiHoy = H.oi && H.oi.length ? H.oi[0] : null, oiN = est(H.oi && H.oi.length > 1 ? H.oi.slice(1) : null);
+      o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
+      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Los dos P/C (borde punteado) se comparan con el normal de 20 días de ${it.nombre}: si se alejan 1 desvío marcan Alcista/Bajista (lectura "miedo = bajista", pendiente de probar). No suman al conteo porque el P/C volumen ya está dentro de "Opciones" y el P/C OI cambia una sola vez al día.</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
     }
@@ -452,6 +458,7 @@
         .tab{border:1px solid #1e2a36;border-radius:8px;padding:5px 7px;margin:0 0 7px;background:#0a0f15}
         .tabh{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin-bottom:4px}.tabh b{font-size:12.5px}
         .tabg{display:flex;gap:5px;flex-wrap:wrap}.tc{display:inline-flex;flex-direction:column;padding:3px 7px;border-radius:6px;border:1px solid #2a3340;font-size:12px;line-height:1.25;min-width:96px}
+        .tcx{border-style:dashed}
         .tc small{font-size:9.5px;color:#8b9bb0;text-transform:uppercase;letter-spacing:.04em}.tc i{font-style:normal;font-size:10px;color:#9fb3c8}
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
