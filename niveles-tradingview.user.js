@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.2
+// @version      3.3
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -26,6 +26,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
+  const VER_DATOS = 33; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -212,7 +213,7 @@
         } catch (e) { const prev = (gmGet('ng_data', null) || { items: {} }).items[sym]; items[sym] = prev && !prev.error ? Object.assign({}, prev, { viejo: prev.viejo || (gmGet('ng_data', null) || {}).hora || '?' }) : { error: 'Barchart no respondió (' + String(e.message || e) + ') · se reintenta solo en 5 min' }; }
       }
       const data = { t: Date.now(), hora: horaLima(), items };
-      gmSet('ng_data', data);
+      data.ver = VER_DATOS; gmSet('ng_data', data);
       return data;
     }
 
@@ -561,7 +562,7 @@
     async function ciclo(forzar) {
       if (corriendo) return;
       const d = gmGet('ng_data', null), ttl = mercadoAbierto() ? CICLO_ABIERTO_MS : CICLO_CERRADO_MS, lock = gmGet('ng_lock', 0);
-      if (!forzar && ((d && Date.now() - d.t < ttl) || Date.now() - lock < 3 * 60e3)) return;
+      if (!forzar && ((d && d.ver === VER_DATOS && Date.now() - d.t < ttl) || Date.now() - lock < 3 * 60e3)) return;
       corriendo = true; gmSet('ng_lock', Date.now()); pintar('· calculando gamma…');
       try { await calcular(); pintar(); } catch (e) { pintar('· ⚠ ' + (e.message || e)); } finally { corriendo = false; gmSet('ng_lock', 0); }
     }
