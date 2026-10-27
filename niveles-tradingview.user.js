@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.9
+// @version      3.0
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -124,7 +124,7 @@
       let all = [];
       for (let pg = 1; pg <= 12; pg++) {
         const j = await api('/proxies/core-api/v1/options/get', {
-          symbol: sym, fields: 'strikePrice,optionType,openInterest,gamma,volatility,expirationDate,volume,lastPrice',
+          symbol: sym, fields: 'strikePrice,optionType,openInterest,gamma,volatility,expirationDate,volume,lastPrice,bidPrice,askPrice',
           orderBy: 'daysToExpiration', orderDir: 'asc', limit: 1000, page: pg, raw: 1,
         });
         const d = (j.data || []).map((x) => x.raw || x);
@@ -176,10 +176,17 @@
             const inu = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= 14 && (x.volume || 0) >= 500 && (x.volume || 0) >= 1.25 * (x.openInterest || 0));
             const prem = (L) => L.reduce((t, x) => t + (x.volume || 0) * (x.lastPrice || 0) * 100, 0);
             const ic = prem(inu.filter((x) => x.optionType === 'Call')), ip = prem(inu.filter((x) => x.optionType === 'Put'));
-            opc.inus = { n: inu.length, calls: ic, puts: ip };
+            // v3.0: lado de cada contrato (como colorea Barchart): último precio sobre el medio = comprado, bajo el medio = vendido.
+            // alcista = call comprada o put vendida · bajista = put comprada o call vendida
+            let ia = 0, ib = 0;
+            for (const x of inu) { const mid = x.bidPrice > 0 && x.askPrice > 0 ? (x.bidPrice + x.askPrice) / 2 : null; if (!mid || !(x.lastPrice > 0)) continue;
+              const lado = x.lastPrice > mid * 1.001 ? 1 : x.lastPrice < mid * 0.999 ? -1 : 0, pr = (x.volume || 0) * x.lastPrice * 100, sg = (x.optionType === 'Call' ? 1 : -1) * lado;
+              if (sg > 0) ia += pr; else if (sg < 0) ib += pr; }
+            opc.inus = { n: inu.length, calls: ic, puts: ip, alc: ia, baj: ib };
             if (mercadoAbierto()) {
-              const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,side,premium,tradeTime', raw: 1, limit: 300, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,100000)': '' });
-              const F = (fj.data || []).map((x) => x.raw || x).filter((o) => new Date(o.tradeTime * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === hoy);
+              // v3.0: mismo filtro que la página "Options Flow" de Barchart: prima > $20 k, vence en < 10 días, tamaño > 50
+              const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,side,premium,tradeTime,tradeSize,dte', raw: 1, limit: 500, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,20000)': '', 'lt(dte,10)': '' });
+              const F = (fj.data || []).map((x) => x.raw || x).filter((o) => (o.tradeSize || 0) > 50 && new Date(o.tradeTime * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === hoy);
               let alc = 0, baj = 0; for (const o of F) { const c = o.symbolType === 'Call', ask = o.side === 'ask', bid = o.side === 'bid'; if ((c && ask) || (!c && bid)) alc += o.premium; else if ((!c && ask) || (c && bid)) baj += o.premium; }
               opc.flujo = { n: F.length, alc, baj };
             }
@@ -336,9 +343,10 @@
       const hv = est(H.vol), ho = est(H.oi);
       // sub-lecturas de opciones (+1 alcista / −1 bajista / 0)
       const sub = [];
-      if (O.flujo && O.flujo.n >= 8) sub.push(['flujo', O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
+      const vNeto = (a, b) => { const t = a + b; if (!t) return 0; const r = (a - b) / t; return r >= 0.3 ? 1 : r <= -0.3 ? -1 : 0; };
+      if (O.flujo && O.flujo.n >= 5) sub.push(['flujo', vNeto(O.flujo.alc, O.flujo.baj), `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
       if (O.pcVolTot != null && hv && hv.sd > 0) { const z = (O.pcVolTot - hv.m) / hv.sd; sub.push(['P/C', z >= 1 ? -1 : z <= -1 ? 1 : 0, `${O.pcVolTot.toFixed(2)} vs normal ${hv.m.toFixed(2)}`]); }
-      if (O.inus && O.inus.n) sub.push(['inusual', O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0, `c ${M(O.inus.calls)}/p ${M(O.inus.puts)}`]);
+      if (O.inus && O.inus.n && O.inus.alc != null) sub.push(['inusual', vNeto(O.inus.alc, O.inus.baj), `${M(O.inus.alc)}/${M(O.inus.baj)}`]);
       const so = sub.reduce((t, x) => t + x[1], 0);
       const S = [];   // [nombre, voto, detalle]
       S.push(['Precio vs VWAP', V ? (Math.abs(V.pct) < 0.03 ? 0 : V.lado) : null, V ? `${V.pct >= 0 ? '+' : ''}${V.pct.toFixed(2)} %` : 'sin velas']);
@@ -357,9 +365,9 @@
       o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
       // v2.9: actividad inusual y flujo grande también en su propio cuadrito
       const tile = (n, v, d) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad'}</b><i>${d}</i></span>`;
-      if (O.inus) o += O.inus.n ? tile('Actividad inusual', O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0, `${O.inus.n} contratos · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
-      if (O.flujo) o += O.flujo.n >= 8 ? tile('Flujo grande', O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, `${O.flujo.n} ops · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`) : `<span class="tc tcx fn"><small>Flujo grande</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops &gt; $100 k</i></span>`;
-      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto. Flujo: operaciones &gt; $100 k según el lado (ask/bid).</div>`;
+      if (O.inus) o += O.inus.n ? tile('Actividad inusual', O.inus.alc != null ? vNeto(O.inus.alc, O.inus.baj) : 0, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'} (comprado vs vendido)`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
+      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vNeto(O.flujo.alc, O.flujo.baj), `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))} · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
+      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto, según si se compró o vendió. Flujo: mismo filtro que la página de Barchart (&gt; $20 k, vence en &lt; 10 días, tamaño &gt; 50); neto ±30 % = señal.</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
     }
