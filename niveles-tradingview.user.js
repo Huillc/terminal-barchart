@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.0
+// @version      3.2
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -178,17 +178,21 @@
             const ic = prem(inu.filter((x) => x.optionType === 'Call')), ip = prem(inu.filter((x) => x.optionType === 'Put'));
             // v3.0: lado de cada contrato (como colorea Barchart): último precio sobre el medio = comprado, bajo el medio = vendido.
             // alcista = call comprada o put vendida · bajista = put comprada o call vendida
-            let ia = 0, ib = 0;
+            let ia = 0, ib = 0; const k4 = { cc: 0, cv: 0, pc: 0, pv: 0 };
             for (const x of inu) { const mid = x.bidPrice > 0 && x.askPrice > 0 ? (x.bidPrice + x.askPrice) / 2 : null; if (!mid || !(x.lastPrice > 0)) continue;
               const lado = x.lastPrice > mid * 1.001 ? 1 : x.lastPrice < mid * 0.999 ? -1 : 0, pr = (x.volume || 0) * x.lastPrice * 100, sg = (x.optionType === 'Call' ? 1 : -1) * lado;
-              if (sg > 0) ia += pr; else if (sg < 0) ib += pr; }
-            opc.inus = { n: inu.length, calls: ic, puts: ip, alc: ia, baj: ib };
+              if (sg > 0) ia += pr; else if (sg < 0) ib += pr;
+              if (lado) k4[(x.optionType === 'Call' ? 'c' : 'p') + (lado > 0 ? 'c' : 'v')] += pr; }
+            opc.inus = { n: inu.length, calls: ic, puts: ip, alc: ia, baj: ib, k4 };
             if (mercadoAbierto()) {
               // v3.0: mismo filtro que la página "Options Flow" de Barchart: prima > $20 k, vence en < 10 días, tamaño > 50
               const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,side,premium,tradeTime,tradeSize,dte', raw: 1, limit: 500, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,20000)': '', 'lt(dte,10)': '' });
               const F = (fj.data || []).map((x) => x.raw || x).filter((o) => (o.tradeSize || 0) > 50 && new Date(o.tradeTime * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === hoy);
-              let alc = 0, baj = 0; for (const o of F) { const c = o.symbolType === 'Call', ask = o.side === 'ask', bid = o.side === 'bid'; if ((c && ask) || (!c && bid)) alc += o.premium; else if ((!c && ask) || (c && bid)) baj += o.premium; }
-              opc.flujo = { n: F.length, alc, baj };
+              let alc = 0, baj = 0; const k4 = { cc: 0, cv: 0, pc: 0, pv: 0 };
+              for (const o of F) { const c = o.symbolType === 'Call', ask = o.side === 'ask', bid = o.side === 'bid';
+                if ((c && ask) || (!c && bid)) alc += o.premium; else if ((!c && ask) || (c && bid)) baj += o.premium;
+                if (c && ask) k4.cc += o.premium; if (c && bid) k4.cv += o.premium; if (!c && ask) k4.pc += o.premium; if (!c && bid) k4.pv += o.premium; }
+              opc.flujo = { n: F.length, alc, baj, k4 };
             }
           } catch (e) {}
           const a = ACTIVOS[sym], cReal = cfd[a.cfd], cIdx = spot[a.idx];
@@ -326,6 +330,23 @@
       const [hh, mm] = prox.h.split(':').map(Number), [ah, am] = ahora.split(':').map(Number); prox.faltan = hh * 60 + mm - (ah * 60 + am);
       return prox;
     }
+    // v3.1: ¿quién mueve las opciones? (calls compradas/vendidas, puts compradas/vendidas) + interpretación en palabras
+    function quien(k, subePrecio) {
+      if (!k) return '';
+      const M = (v) => v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + ' M' : '$' + Math.round(v / 1e3) + ' k';
+      const L = [['calls compradas', k.cc], ['calls vendidas', k.cv], ['puts compradas', k.pc], ['puts vendidas', k.pv]], tot = L.reduce((t, x) => t + x[1], 0);
+      if (!tot) return '';
+      const top = [...L].sort((a, b) => b[1] - a[1])[0], dom = top[1] / tot >= 0.45 ? top[0] : null;
+      const frase = !dom ? 'mezclado: sin un lado dominante' :
+        dom === 'calls vendidas' ? (subePrecio ? 'toma de ganancias / techo en la subida (no es apuesta a caída)' : 'venden calls: esperan que no suba') :
+        dom === 'calls compradas' ? (subePrecio ? 'compran la subida: apuestan a más alza' : 'compran calls en la caída: apuestan al rebote') :
+        dom === 'puts compradas' ? (subePrecio ? 'compran protección en la subida (cobertura)' : 'compran puts en la caída: apuestan a más baja') :
+        (subePrecio ? 'venden puts: confían en el piso' : 'venden puts en la caída: ven piso cerca');
+      return `<i style="display:block;margin-top:2px">${L.filter((x) => x[1] > 0).map((x) => `${x[0]} ${M(x[1])}`).join(' · ')}</i><i style="display:block;color:#ffd08a">→ ${frase}</i>`;
+    }
+    // v3.2: veredicto según las APUESTAS de dirección, no según el lado bruto.
+    // Con el precio subiendo, vender calls = toma de ganancias (no cuenta como bajista); con el precio bajando, vender puts = toma de ganancias.
+    function apuestas(k, sube) { if (!k) return null; return { alc: k.cc + (sube ? k.pv : 0), baj: k.pc + (sube ? 0 : k.cv), tg: sube ? k.cv : k.pv }; }
     function filaLectura(sym, it, dd) {
       const V = vwapDe((dd.b5 || {})[sym]), N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
       const t = (c, a, b) => `<span class="ft ${c}"><small>${a}</small>${b}</span>`;
@@ -344,9 +365,12 @@
       // sub-lecturas de opciones (+1 alcista / −1 bajista / 0)
       const sub = [];
       const vNeto = (a, b) => { const t = a + b; if (!t) return 0; const r = (a - b) / t; return r >= 0.3 ? 1 : r <= -0.3 ? -1 : 0; };
-      if (O.flujo && O.flujo.n >= 5) sub.push(['flujo', vNeto(O.flujo.alc, O.flujo.baj), `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
+      const sube = V ? V.lado > 0 : (c1 && it.spot > c1.c);
+      const aF = O.flujo && apuestas(O.flujo.k4, sube), aI = O.inus && apuestas(O.inus.k4, sube);
+      const vFl = O.flujo ? (aF ? vNeto(aF.alc, aF.baj) : vNeto(O.flujo.alc, O.flujo.baj)) : 0, vIn = O.inus && O.inus.alc != null ? (aI ? vNeto(aI.alc, aI.baj) : vNeto(O.inus.alc, O.inus.baj)) : 0;
+      if (O.flujo && O.flujo.n >= 5) sub.push(['flujo', vFl, aF ? `${M(aF.alc)}/${M(aF.baj)}` : `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
       if (O.pcVolTot != null && hv && hv.sd > 0) { const z = (O.pcVolTot - hv.m) / hv.sd; sub.push(['P/C', z >= 1 ? -1 : z <= -1 ? 1 : 0, `${O.pcVolTot.toFixed(2)} vs normal ${hv.m.toFixed(2)}`]); }
-      if (O.inus && O.inus.n && O.inus.alc != null) sub.push(['inusual', vNeto(O.inus.alc, O.inus.baj), `${M(O.inus.alc)}/${M(O.inus.baj)}`]);
+      if (O.inus && O.inus.n && O.inus.alc != null) sub.push(['inusual', vIn, aI ? `${M(aI.alc)}/${M(aI.baj)}` : `${M(O.inus.alc)}/${M(O.inus.baj)}`]);
       const so = sub.reduce((t, x) => t + x[1], 0);
       const S = [];   // [nombre, voto, detalle]
       S.push(['Precio vs VWAP', V ? (Math.abs(V.pct) < 0.03 ? 0 : V.lado) : null, V ? `${V.pct >= 0 ? '+' : ''}${V.pct.toFixed(2)} %` : 'sin velas']);
@@ -355,7 +379,22 @@
       S.push(['Tendencia (ayer)', c1 && c2 ? ((c1.c / c2.c - 1) * 100 > 0.3 ? 1 : (c1.c / c2.c - 1) * 100 < -0.3 ? -1 : 0) : null, c1 && c2 ? `${(c1.c / c2.c - 1) * 100 > 0 ? '+' : ''}${((c1.c / c2.c - 1) * 100).toFixed(2)} %` : '—']);
       const nA = S.filter((x) => x[1] === 1).length, nB = S.filter((x) => x[1] === -1).length, nE = S.length - nA - nB;
       const cons = nA >= 3 && nB === 0 ? ['fu', 'MAYORÍA ALCISTA'] : nB >= 3 && nA === 0 ? ['fd', 'MAYORÍA BAJISTA'] : ['fn', 'SIN CONSENSO'];
-      let o = `<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato · de 4 votos independientes</span><span class="m" style="margin-left:auto">consenso = 3 de 4 sin ninguno en contra · NO probado</span></div><div class="tabg">`;
+      // lectura general (v3.2): precio + quién apuesta + quién toma ganancias + P/C, en una frase
+      const Mm = (v) => '$' + M(v), sumA = (f) => (aF ? aF[f] : 0) + (aI ? aI[f] : 0);
+      const A_ = sumA('alc'), B_ = sumA('baj'), TG = sumA('tg'), pcZ = O.pcVolTot != null && hv && hv.sd > 0 ? (O.pcVolTot - hv.m) / hv.sd : null;
+      let gen = null;
+      if (V || A_ + B_ + TG > 0) {
+        const poco = A_ + B_ < 250000, dirOp = poco ? 0 : vNeto(A_, B_), pre = V ? (V.lado > 0 ? `${it.nombre} sube sobre el VWAP` : `${it.nombre} baja bajo el VWAP`) : `${it.nombre} ${sube ? 'sobre' : 'bajo'} el cierre de ayer`;
+        const ap = A_ + B_ > 0 ? `apuestas${poco ? ' (poco dinero, < $250 k: no cuenta)' : ''}: ${dirOp > 0 ? 'compran al alza' : dirOp < 0 ? 'compran a la baja' : 'repartidas'} (alza ${Mm(A_)} · baja ${Mm(B_)})` : 'sin apuestas grandes';
+        const tg = TG > 0 ? `; ${sube ? 'venden calls' : 'venden puts'} ${Mm(TG)} = toma de ganancias` : '';
+        const pc = pcZ == null ? '' : pcZ >= 1 ? '; P/C alto: hay cobertura' : pcZ <= -1 ? '; P/C bajo: poca cobertura' : '';
+        const dirP = V ? V.lado : (sube ? 1 : -1);
+        const ver = dirOp === dirP ? [dirP > 0 ? 'fu' : 'fd', dirP > 0 ? 'ALCISTA' : 'BAJISTA', TG > Math.max(A_, B_) ? ' con freno: no perseguir, mejor en retroceso al VWAP' : ': opciones y precio van juntos']
+          : dirOp === 0 ? [dirP > 0 ? 'fu' : 'fd', dirP > 0 ? 'ALCISTA' : 'BAJISTA', ' (lo lleva el precio; opciones sin apuesta en contra)']
+          : ['fn', 'DIVERGENCIA', `: el precio va ${dirP > 0 ? 'arriba' : 'abajo'} pero las apuestas van ${dirOp > 0 ? 'arriba' : 'abajo'}; vigilar el VWAP`];
+        gen = `<div class="gen ${ver[0]}"><b>${ver[1]}</b>${ver[2]}<i>${pre}; ${ap}${tg}${pc}.${V && atraso > 8 ? ` Dato de hace ${atraso} min.` : ''}</i></div>`;
+      }
+      let o = `${gen || ''}<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato · de 4 votos independientes</span><span class="m" style="margin-left:auto">consenso = 3 de 4 sin ninguno en contra · NO probado</span></div><div class="tabg">`;
       for (const [n, v, d] of S) o += `<span class="tc ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin dato'}</b><i>${d}</i></span>`;
       // v2.8: P/C volumen y P/C OI en su propio cuadrito, con veredicto frente al normal de 20 días de ESTE activo
       const pcT = (n, hoy, normal, sd) => { if (hoy == null || !normal) return `<span class="tc fn tcx"><small>${n}</small><b>Sin dato</b></span>`;
@@ -365,8 +404,8 @@
       o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
       // v2.9: actividad inusual y flujo grande también en su propio cuadrito
       const tile = (n, v, d) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad'}</b><i>${d}</i></span>`;
-      if (O.inus) o += O.inus.n ? tile('Actividad inusual', O.inus.alc != null ? vNeto(O.inus.alc, O.inus.baj) : 0, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'} (comprado vs vendido)`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
-      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vNeto(O.flujo.alc, O.flujo.baj), `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))} · alc ${M(O.flujo.alc)} / baj ${M(O.flujo.baj)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
+      if (O.inus) o += O.inus.n ? tile('Actividad inusual', vIn, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'}${quien(O.inus.k4, sube)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
+      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vFl, `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))}${quien(O.flujo.k4, sube)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
       o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto, según si se compró o vendió. Flujo: mismo filtro que la página de Barchart (&gt; $20 k, vence en &lt; 10 días, tamaño &gt; 50); neto ±30 % = señal.</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
@@ -470,7 +509,8 @@
         .tab{border:1px solid #1e2a36;border-radius:8px;padding:5px 7px;margin:0 0 7px;background:#0a0f15}
         .tabh{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin-bottom:4px}.tabh b{font-size:12.5px}
         .tabg{display:flex;gap:5px;flex-wrap:wrap}.tc{display:inline-flex;flex-direction:column;padding:3px 7px;border-radius:6px;border:1px solid #2a3340;font-size:12px;line-height:1.25;min-width:96px}
-        .tcx{border-style:dashed}
+        .tcx{border-style:dashed;max-width:360px}
+        .gen{margin:6px 0 4px;padding:6px 10px;border-radius:6px;border:1px solid currentColor;font-size:13px}.gen b{font-size:14px;margin-right:4px}.gen i{display:block;font-style:normal;color:#cfd6e0;font-size:11.5px;margin-top:2px}
         .tc small{font-size:9.5px;color:#8b9bb0;text-transform:uppercase;letter-spacing:.04em}.tc i{font-style:normal;font-size:10px;color:#9fb3c8}
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
