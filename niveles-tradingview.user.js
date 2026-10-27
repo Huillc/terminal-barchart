@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.6
+// @version      2.7
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -169,6 +169,7 @@
             const cer = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= 3);
             const cv = sum(cer.filter((x) => x.optionType === 'Call'), 'volume'), pv = sum(cer.filter((x) => x.optionType === 'Put'), 'volume');
             opc.pcVol = cv ? pv / cv : null;
+            { const T = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= DIAS_ESTR), c2 = sum(T.filter((x) => x.optionType === 'Call'), 'volume'), p2 = sum(T.filter((x) => x.optionType === 'Put'), 'volume'); opc.pcVolTot = c2 ? p2 / c2 : null; }
             const est = ch.filter((x) => dte(x.expirationDate, hoy) >= 0 && dte(x.expirationDate, hoy) <= DIAS_ESTR);
             const co = sum(est.filter((x) => x.optionType === 'Call'), 'openInterest'), po = sum(est.filter((x) => x.optionType === 'Put'), 'openInterest');
             opc.pcOI = co ? po / co : null;
@@ -217,6 +218,17 @@
         }
         gmSet('ng_eod', eod);
       }
+      // v2.7: historia diaria de put/call de Barchart (60 días) → cada activo se compara con SU propio normal
+      let pch = gmGet('ng_pchist', null);
+      if (!pch || pch.dia !== t.dia) {
+        pch = { dia: t.dia, s: {} };
+        for (const s of Object.keys(ACTIVOS)) {
+          try { const j = await api('/proxies/core-api/v1/options-historical/get', { symbol: s, fields: 'date,putCallVolumeRatio,putCallOpenInterestRatio', orderBy: 'date', orderDir: 'desc', limit: 60, raw: 1 });
+            const d = (j.data || []).map((x) => x.raw || x).filter((x) => x.date < t.dia);
+            pch.s[s] = { vol: d.map((x) => x.putCallVolumeRatio).filter((x) => x > 0).slice(0, 20), oi: d.map((x) => x.putCallOpenInterestRatio).filter((x) => x > 0).slice(0, 20) }; } catch (e) {}
+        }
+        gmSet('ng_pchist', pch);
+      }
       // 5 min de QQQ de hoy (para la entrada de contexto) — solo desde las 10:30 NY y una vez
       // v2.3: velas de 5 min de DIA, QQQ y GLD en sesión (VWAP de la fila de lectura + contexto 10:30)
       let b5 = gmGet('ng_b5', null);
@@ -230,7 +242,7 @@
         }
         gmSet('ng_b5', b5);
       }
-      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, b5: b5.s, barras: b5.s.QQQ || [] };
+      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, pch: pch.s, b5: b5.s, barras: b5.s.QQQ || [] };
       gmSet('ng_dia', dd);
       return dd;
     }
@@ -316,22 +328,30 @@
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}${N.cache ? `<i>leído hace ${N.cache} min</i>` : ''}`) : t('fn', 'Noticias', 'FALTA<i>abre el terminal general</i>');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
       h += '</div>';
-      // segunda fila (v2.5): cada dato con su veredicto ALCISTA / BAJISTA / EQUILIBRADO y un conteo simple (no probado)
+      // tablero (v2.7): 4 votos INDEPENDIENTES. Las tres lecturas de opciones (flujo, P/C volumen, inusual) se juntan en UN voto,
+      // el P/C se compara con el normal de 20 días de ESE activo (no con un umbral fijo) y el P/C OI queda de fondo, sin votar.
       const O = it.opc || {}, M = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' : Math.round(v / 1e3) + ' k';
       const E = (dd.eod || {})[sym] || [], hoyE = E.length && E[E.length - 1].d === ny().dia, c1 = E[E.length - (hoyE ? 2 : 1)], c2 = E[E.length - (hoyE ? 3 : 2)];
-      const S = [];   // [nombre, veredicto (+1/−1/0/null), detalle]
-      if (V) S.push(['Precio vs VWAP', Math.abs(V.pct) < 0.03 ? 0 : V.lado, `${V.pct >= 0 ? '+' : ''}${V.pct.toFixed(2)} %`]);
-      if (O.flujo) S.push(['Flujo grande', O.flujo.n < 8 ? null : O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, O.flujo.n < 8 ? `solo ${O.flujo.n} ops` : `${O.flujo.n} ops · ${M(O.flujo.alc)} / ${M(O.flujo.baj)}`]);
-      if (O.pcVol != null) S.push(['P/C vol (≤3 d)', O.pcVol < 0.8 ? 1 : O.pcVol > 1.2 ? -1 : 0, O.pcVol.toFixed(2)]);
-      if (O.pcOI != null) S.push(['P/C OI', O.pcOI < 0.8 ? 1 : O.pcOI > 1.2 ? -1 : 0, O.pcOI.toFixed(2)]);
-      if (O.inus) S.push(['Inusual', O.inus.n ? (O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0) : null, O.inus.n ? `${O.inus.n} · calls ${M(O.inus.calls)} / puts ${M(O.inus.puts)}` : 'sin actividad']);
-      if (c1 && c2) { const r = (c1.c / c2.c - 1) * 100; S.push(['Tendencia (ayer)', r > 0.3 ? 1 : r < -0.3 ? -1 : 0, (r > 0 ? '+' : '') + r.toFixed(2) + ' %']); }
+      const H = (dd.pch || {})[sym] || {}, est = (a) => { if (!a || a.length < 10) return null; const m = a.reduce((x, y) => x + y, 0) / a.length; return { m, sd: Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)) }; };
+      const hv = est(H.vol), ho = est(H.oi);
+      // sub-lecturas de opciones (+1 alcista / −1 bajista / 0)
+      const sub = [];
+      if (O.flujo && O.flujo.n >= 8) sub.push(['flujo', O.flujo.alc > 1.5 * O.flujo.baj ? 1 : O.flujo.baj > 1.5 * O.flujo.alc ? -1 : 0, `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
+      if (O.pcVolTot != null && hv && hv.sd > 0) { const z = (O.pcVolTot - hv.m) / hv.sd; sub.push(['P/C', z >= 1 ? -1 : z <= -1 ? 1 : 0, `${O.pcVolTot.toFixed(2)} vs normal ${hv.m.toFixed(2)}`]); }
+      if (O.inus && O.inus.n) sub.push(['inusual', O.inus.calls > 2 * O.inus.puts ? 1 : O.inus.puts > 2 * O.inus.calls ? -1 : 0, `c ${M(O.inus.calls)}/p ${M(O.inus.puts)}`]);
+      const so = sub.reduce((t, x) => t + x[1], 0);
+      const S = [];   // [nombre, voto, detalle]
+      S.push(['Precio vs VWAP', V ? (Math.abs(V.pct) < 0.03 ? 0 : V.lado) : null, V ? `${V.pct >= 0 ? '+' : ''}${V.pct.toFixed(2)} %` : 'sin velas']);
+      S.push(['Opciones', sub.length ? (so >= 2 ? 1 : so <= -2 ? -1 : 0) : null, sub.length ? sub.map((x) => `${x[0]} ${x[1] > 0 ? '▲' : x[1] < 0 ? '▼' : '='}`).join(' · ') : 'sin datos']);
+      S.push(['Noticias', N ? (N.score >= 15 ? 1 : N.score <= -15 ? -1 : 0) : null, N ? `${N.score > 0 ? '+' : ''}${N.score}` : 'FALTA']);
+      S.push(['Tendencia (ayer)', c1 && c2 ? ((c1.c / c2.c - 1) * 100 > 0.3 ? 1 : (c1.c / c2.c - 1) * 100 < -0.3 ? -1 : 0) : null, c1 && c2 ? `${(c1.c / c2.c - 1) * 100 > 0 ? '+' : ''}${((c1.c / c2.c - 1) * 100).toFixed(2)} %` : '—']);
       const nA = S.filter((x) => x[1] === 1).length, nB = S.filter((x) => x[1] === -1).length, nE = S.length - nA - nB;
-      const cons = nA >= 4 && nB <= 1 ? ['fu', 'MAYORÍA ALCISTA'] : nB >= 4 && nA <= 1 ? ['fd', 'MAYORÍA BAJISTA'] : ['fn', 'SIN CONSENSO'];
-      let o = `<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato</span><span class="m" style="margin-left:auto">conteo simple · contexto, NO probado</span></div><div class="tabg">`;
-      for (const [n, v, d] of S) o += `<span class="tc ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Insuficiente'}</b><i>${d}</i></span>`;
-      o += '</div>';
-      return h + o + '</div>';
+      const cons = nA >= 3 && nB === 0 ? ['fu', 'MAYORÍA ALCISTA'] : nB >= 3 && nA === 0 ? ['fd', 'MAYORÍA BAJISTA'] : ['fn', 'SIN CONSENSO'];
+      let o = `<div class="tab"><div class="tabh"><b class="${cons[0]}">${cons[1]}</b> <span class="up">${nA} alcistas</span> · <span class="dn">${nB} bajistas</span> · <span class="m">${nE} equilibradas / sin dato · de 4 votos independientes</span><span class="m" style="margin-left:auto">consenso = 3 de 4 sin ninguno en contra · NO probado</span></div><div class="tabg">`;
+      for (const [n, v, d] of S) o += `<span class="tc ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin dato'}</b><i>${d}</i></span>`;
+      o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">De fondo (no vota): P/C OI ${O.pcOI != null ? O.pcOI.toFixed(2) : '—'}${ho ? ` · su normal ${ho.m.toFixed(2)}` : ''} · P/C se compara con los últimos 20 días de ${it.nombre}: ±1 desvío = señal (lectura "miedo = bajista", pendiente de probar).</div>`;
+      o += '</div>';   // cierra .tab
+      return h + o;
     }
 
     // ── 4) ESCENARIOS (EN PRUEBA): niveles clave + objetivo 200 pts o el siguiente nivel ──
