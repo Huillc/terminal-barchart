@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.4
+// @version      3.5
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -368,7 +368,10 @@
       const vNeto = (a, b) => { const t = a + b; if (!t) return 0; const r = (a - b) / t; return r >= 0.3 ? 1 : r <= -0.3 ? -1 : 0; };
       const sube = V ? V.lado > 0 : (c1 && it.spot > c1.c);
       const aF = O.flujo && apuestas(O.flujo.k4, sube), aI = O.inus && apuestas(O.inus.k4, sube);
-      const vFl = O.flujo ? (aF ? vNeto(aF.alc, aF.baj) : vNeto(O.flujo.alc, O.flujo.baj)) : 0, vIn = O.inus && O.inus.alc != null ? (aI ? vNeto(aI.alc, aI.baj) : vNeto(O.inus.alc, O.inus.baj)) : 0;
+      // v3.5: misma regla que la lectura general: apuestas < $250 k no cuentan (poco dinero = sin señal)
+      const POCO = 250000, poca = (a) => a && a.alc + a.baj < POCO;
+      const vFl = O.flujo ? (poca(aF) ? 0 : aF ? vNeto(aF.alc, aF.baj) : vNeto(O.flujo.alc, O.flujo.baj)) : 0, vIn = O.inus && O.inus.alc != null ? (poca(aI) ? 0 : aI ? vNeto(aI.alc, aI.baj) : vNeto(O.inus.alc, O.inus.baj)) : 0;
+      const notaPoco = (a) => poca(a) ? `<i style="display:block;color:#7f93a8">poco dinero en apuestas (${'$' + Math.round((a.alc + a.baj) / 1e3)} k &lt; $250 k): no cuenta</i>` : '';
       if (O.flujo && O.flujo.n >= 5) sub.push(['flujo', vFl, aF ? `${M(aF.alc)}/${M(aF.baj)}` : `${M(O.flujo.alc)}/${M(O.flujo.baj)}`]);
       if (O.pcVolTot != null && hv && hv.sd > 0) { const z = (O.pcVolTot - hv.m) / hv.sd; sub.push(['P/C', z >= 1 ? -1 : z <= -1 ? 1 : 0, `${O.pcVolTot.toFixed(2)} vs normal ${hv.m.toFixed(2)}`]); }
       if (O.inus && O.inus.n && O.inus.alc != null) sub.push(['inusual', vIn, aI ? `${M(aI.alc)}/${M(aI.baj)}` : `${M(O.inus.alc)}/${M(O.inus.baj)}`]);
@@ -385,7 +388,7 @@
       const A_ = sumA('alc'), B_ = sumA('baj'), TG = sumA('tg'), pcZ = O.pcVolTot != null && hv && hv.sd > 0 ? (O.pcVolTot - hv.m) / hv.sd : null;
       let gen = null;
       if (V || A_ + B_ + TG > 0) {
-        const poco = A_ + B_ < 250000, dirOp = poco ? 0 : vNeto(A_, B_), pre = V ? (V.lado > 0 ? `${it.nombre} sube sobre el VWAP` : `${it.nombre} baja bajo el VWAP`) : `${it.nombre} ${sube ? 'sobre' : 'bajo'} el cierre de ayer`;
+        const poco = A_ + B_ < POCO, dirOp = poco ? 0 : vNeto(A_, B_), pre = V ? (V.lado > 0 ? `${it.nombre} sube sobre el VWAP` : `${it.nombre} baja bajo el VWAP`) : `${it.nombre} ${sube ? 'sobre' : 'bajo'} el cierre de ayer`;
         const ap = A_ + B_ > 0 ? `apuestas${poco ? ' (poco dinero, < $250 k: no cuenta)' : ''}: ${dirOp > 0 ? 'compran al alza' : dirOp < 0 ? 'compran a la baja' : 'repartidas'} (alza ${Mm(A_)} · baja ${Mm(B_)})` : 'sin apuestas grandes';
         const tg = TG > 0 ? `; ${sube ? 'venden calls' : 'venden puts'} ${Mm(TG)} = toma de ganancias` : '';
         const pc = pcZ == null ? '' : pcZ >= 1 ? '; P/C alto: hay cobertura' : pcZ <= -1 ? '; P/C bajo: poca cobertura' : '';
@@ -405,8 +408,8 @@
       o += pcT('P/C volumen', O.pcVolTot, hv && hv.m, hv && hv.sd) + pcT('P/C OI', oiHoy, oiN && oiN.m, oiN && oiN.sd);
       // v2.9: actividad inusual y flujo grande también en su propio cuadrito
       const tile = (n, v, d) => `<span class="tc tcx ${v === 1 ? 'fu' : v === -1 ? 'fd' : 'fn'}"><small>${n}</small><b>${v === 1 ? 'Alcista' : v === -1 ? 'Bajista' : v === 0 ? 'Equilibrado' : 'Sin actividad'}</b><i>${d}</i></span>`;
-      if (O.inus) o += O.inus.n ? tile('Actividad inusual', vIn, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'}${quien(O.inus.k4, sube)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
-      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vFl, `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))}${quien(O.flujo.k4, sube)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
+      if (O.inus) o += O.inus.n ? tile('Actividad inusual', vIn, `${O.inus.n} contratos · neto ${O.inus.alc != null ? (O.inus.alc - O.inus.baj >= 0 ? '+' : '−') + M(Math.abs(O.inus.alc - O.inus.baj)) : '—'}${quien(O.inus.k4, sube)}${notaPoco(aI)}`) : tile('Actividad inusual', null, 'vol > 1,25× OI · ≤14 d');
+      if (O.flujo) o += O.flujo.n >= 5 ? tile('Flujo de opciones', vFl, `${O.flujo.n} ops · neto ${O.flujo.alc - O.flujo.baj >= 0 ? '+' : '−'}$${M(Math.abs(O.flujo.alc - O.flujo.baj))}${quien(O.flujo.k4, sube)}${notaPoco(aF)}`) : `<span class="tc tcx fn"><small>Flujo de opciones</small><b>Insuficiente</b><i>solo ${O.flujo.n} ops</i></span>`;
       o += `</div><div class="m" style="font-size:10.5px;margin-top:3px">Borde punteado = detalle, no suma al conteo (ya está resumido en "Opciones"). Los P/C se comparan con el normal de 20 días de ${it.nombre} (±1 desvío; lectura "miedo = bajista", pendiente de probar). Inusual: volumen &gt; 1,25× el interés abierto, según si se compró o vendió. Flujo: mismo filtro que la página de Barchart (&gt; $20 k, vence en &lt; 10 días, tamaño &gt; 50); neto ±30 % = señal.</div>`;
       o += '</div>';   // cierra .tab
       return h + o;
