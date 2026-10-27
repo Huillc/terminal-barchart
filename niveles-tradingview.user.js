@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      2.0
+// @version      2.1
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -244,6 +244,19 @@
       return { señal: true, d, ent, sl, tp: ent + d * 2 * risk, risk };
     }
 
+    // Impulso de la 1ª hora en gamma + (NAS100 · 2024-01→2025-09: 286 ops +15 pts t 2,8 · 2025-10→2026-10: 125 ops +22 pts t 2,4 · EN PRUEBA)
+    function impulso(dd, it) {
+      const t = ny(); if (cerrado()) return { estado: `se evalúa en la próxima sesión a las ${limaDeNY(630)} Lima` };
+      if (t.min < 630) return { estado: `se evalúa a las ${limaDeNY(630)} Lima (10:30 NY)` };
+      const e = it.estructural || {}; if (!e.flip || !it.ratio) return { estado: 'falta el flip' };
+      if (it.spot < e.flip) return { estado: 'hoy no aplica: bajo el flip (gamma −)' };
+      const a = dd.barras.find((x) => x.hm === '09:30'), b = dd.barras.find((x) => x.hm === '10:25'), c = dd.barras.find((x) => x.hm === '10:30') || b;
+      if (!a || !b) return { estado: 'faltan datos de 09:30–10:30' };
+      const d = Math.sign(b.c / a.o - 1); if (!d) return { estado: 'primera hora plana' };
+      const ent = c.o * it.ratio;
+      return { señal: true, d, ent, sl: ent - d * 100, tp: ent + d * 200, risk: 100 };
+    }
+
     // ── 4) ESCENARIOS (EN PRUEBA): niveles clave + objetivo 200 pts o el siguiente nivel ──
     const PASO = { DIA: { stop: 100, obj: 200, u: 'pts' }, QQQ: { stop: 100, obj: 200, u: 'pts' }, GLD: { stop: 10, obj: 20, u: '$' } };
     function niveles(sym, it, dd) {
@@ -262,15 +275,14 @@
       const px = it.cfd, p = PASO[sym], N = niveles(sym, it, dd), s = it.semana || {};
       if (!px || !N.length) return null;
       const arriba = N.filter((x) => x.v > px), abajo = N.filter((x) => x.v < px).reverse();
-      const modo = s.flip ? (it.spot >= s.flip ? 'REBOTE' : 'RUPTURA') : null;
+      const modo = s.flip ? (it.spot >= s.flip ? 'FRENADO' : 'AMPLIO') : null;
       const R1 = arriba[0], R2 = arriba[1], S1 = abajo[0], S2 = abajo[1], out = [];
       const obj = (desde, lado, sig) => { const tope = desde + lado * p.obj; return sig && (lado > 0 ? sig.v < tope : sig.v > tope) ? { v: sig.v, n: sig.n } : { v: tope, n: p.obj + ' ' + p.u }; };
-      if (modo === 'RUPTURA') {
+      // v2.1: el rechazo del muro NO funcionó (2024–26: el muro rebota 32–47 % vs 52–62 % un nivel cualquiera).
+      // Se dejan solo rupturas, en los dos modos, como referencia EN PRUEBA.
+      if (modo) {
         if (R1) { const o = obj(R1.v, 1, R2); out.push({ lado: 1, txt: `COMPRA si una vela de 5 min cierra sobre ${R1.n}`, gat: R1.v, sl: R1.v - p.stop, tp: o.v, tpN: o.n }); }
         if (S1) { const o = obj(S1.v, -1, S2); out.push({ lado: -1, txt: `VENTA si una vela de 5 min cierra bajo ${S1.n}`, gat: S1.v, sl: S1.v + p.stop, tp: o.v, tpN: o.n }); }
-      } else if (modo === 'REBOTE') {
-        if (R1) { const o = obj(R1.v, -1, S1); out.push({ lado: -1, txt: `VENTA si toca ${R1.n} y la vela de 5 min cierra debajo (rechazo)`, gat: R1.v, sl: R1.v + p.stop, tp: o.v, tpN: o.n }); }
-        if (S1) { const o = obj(S1.v, 1, R1); out.push({ lado: 1, txt: `COMPRA si toca ${S1.n} y la vela de 5 min cierra encima (rechazo)`, gat: S1.v, sl: S1.v - p.stop, tp: o.v, tpN: o.n }); }
       }
       return { modo, N, out, px };
     }
@@ -281,7 +293,7 @@
       const D = gmGet('ng_diario', []); let cambio = false; const t = ny();
       for (const x of D) {
         if (x.r != null) continue;
-        if (x.tipo === 'contexto' && (x.dia < t.dia || t.min >= 960) && dd.barras.length && x.dia === t.dia) {
+        if ((x.tipo === 'contexto' || x.tipo === 'impulso') && t.min >= 960 && dd.barras.length && x.dia === t.dia) {
           const k = x.k; let r = null;
           for (const b of dd.barras.filter((b) => b.hm > '10:30')) { const h = b.h * k, l = b.l * k; if (x.d > 0 ? l <= x.sl : h >= x.sl) { r = -1; break; } if (x.d > 0 ? h >= x.tp : l <= x.tp) { r = 2; break; } }
           if (r == null) { const u = dd.barras[dd.barras.length - 1]; r = x.d * (u.c * k - x.ent) / Math.abs(x.ent - x.sl); }
@@ -345,10 +357,13 @@
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
           h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>`;
-          if (E && E.modo) h += `<div><span class="modo ${E.modo === 'RUPTURA' ? 'ru' : 're'}">MODO ${E.modo}</span> <span class="m">${E.modo === 'RUPTURA' ? 'gamma − (bajo el flip): los movimientos se estiran · entrar a favor de la ruptura' : 'gamma + (sobre el flip): los extremos se frenan · entrar en el rechazo'}</span>${sym === 'QQQ' ? '<span class="pr ok">régimen probado</span>' : '<span class="pr">en prueba</span>'}</div>`;
+          if (E && E.modo) h += `<div><span class="modo ${E.modo === 'AMPLIO' ? 'ru' : 're'}">DÍA ${E.modo}</span> <span class="m">${E.modo === 'AMPLIO' ? 'gamma − (bajo el flip): días más amplios · no comprar caídas ni vender subidas por "barato/caro"' : 'gamma + (sobre el flip): días más frenados · el muro NO es freno (se rompe más que un nivel cualquiera)'}</span>${sym !== 'GLD' ? '<span class="pr ok">rango probado</span>' : '<span class="pr">sin efecto en oro</span>'}</div>`;
           // señales probadas
           if (sym === 'QQQ') {
-            const C = contexto(dd, it), Pn = panico(dd);
+            const C = contexto(dd, it), Pn = panico(dd), I = impulso(dd, it);
+            if (I.señal) { h += `<div class="sem si"><b class="${I.d > 0 ? 'up' : 'dn'}">● ENTRAR · ${I.d > 0 ? 'COMPRA' : 'VENTA'} ${f(I.ent, 0)}</b> · stop ${f(I.sl, 0)} · objetivo ${f(I.tp, 0)} (200 pts) · si no toca, cerrar al cierre<br><span class="m">Impulso de la 1ª hora en gamma + · 2024–26: +15 / +22 pts por operación</span><span class="pr">en prueba · 0,25 %</span>${cap ? `<br><span class="m">tamaño para 0,25 %: ${f(cap * 0.0025 / 100, 2)} USD por punto</span>` : ''}</div>`;
+              anotar({ id: 'imp_' + ny().dia, tipo: 'impulso', dia: ny().dia, d: I.d, ent: I.ent, sl: I.sl, tp: I.tp, k: it.ratio }); }
+            else h += `<div class="sem"><b class="m">○ Impulso 1ª hora</b> <span class="m">${I.estado}</span></div>`;
             if (C.señal) { h += `<div class="sem si"><b class="${C.d > 0 ? 'up' : 'dn'}">● ENTRAR · ${C.d > 0 ? 'COMPRA' : 'VENTA'} ${f(C.ent, 0)}</b> · stop ${f(C.sl, 0)} · objetivo ${f(C.tp, 0)} (2R) · riesgo ${f(C.risk, 0)} pts<br><span class="m">Entrada de contexto 10:30 NY · 7 años: 48 % acierto, +0,19 R/op</span><span class="pr">en prueba</span>${cap ? `<br><span class="m">tamaño para 0,5 %: ${f(cap * 0.005 / C.risk, 2)} USD por punto</span>` : ''}</div>`;
               anotar({ id: 'ctx_' + ny().dia, tipo: 'contexto', dia: ny().dia, d: C.d, ent: C.ent, sl: C.sl, tp: C.tp, k: it.ratio }); }
             else h += `<div class="sem"><b class="m">○ Contexto 10:30</b> <span class="m">${C.estado}</span></div>`;
@@ -358,7 +373,7 @@
           } else h += `<div class="sem"><b class="m">○ Sin señal probada para ${it.nombre}</b> <span class="m">· solo escenarios en prueba (riesgo reducido)</span></div>`;
           // escenarios
           if (E && E.out.length) {
-            h += `<div class="m" style="margin-top:4px">Escenarios <span class="pr">en prueba · usar 0,25 % de riesgo</span></div>`;
+            h += `<div class="m" style="margin-top:4px">Rupturas de referencia <span class="pr">NO probadas · solo para ubicar niveles</span></div>`;
             for (const x of E.out) h += `<div class="esc"><b class="${x.lado > 0 ? 'up' : 'dn'}">${x.lado > 0 ? '▲' : '▼'}</b> ${x.txt} (${f(x.gat, d)})<br><span class="m">stop ${f(x.sl, d)} · objetivo ${f(x.tp, d)} (${x.tpN}) · ${p.stop} ${p.u} de riesgo</span></div>`;
           }
           if (E) h += `<div class="niv">${E.N.map((x) => `<span${Math.abs(x.v - E.px) < p.stop ? ' style="color:#fff"' : ''}>${x.n} <b>${f(x.v, d)}</b></span>`).join('')}</div>`;
@@ -366,7 +381,7 @@
         }
         const D = evaluarDiario(dd), hechos = D.filter((x) => x.r != null);
         const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' ? ' %' : ' R'}` : 'aún sin resultados'; };
-        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
+        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
       }
       h += '</div>';
       sh.innerHTML = h;
