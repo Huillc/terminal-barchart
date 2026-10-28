@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.1
+// @version      4.2
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -620,7 +620,9 @@
         h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
       }
       h += '</div>';
+      const bOld = sh.querySelector('.b'), scr = bOld ? bOld.scrollTop : 0;   // v4.2: conservar el desplazamiento al refrescar
       sh.innerHTML = h;
+      { const bN = sh.querySelector('.b'); if (bN && scr) bN.scrollTop = scr; }
       sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', !gmGet('ng_abierto', true)); pintar(); };
       sh.getElementById('ac').onclick = () => { ciclo(true); cicloDia(true); };
       { const b = sh.getElementById('oa'); if (b) b.onclick = () => {
@@ -655,6 +657,8 @@
     setTimeout(() => cicloDia(false), 3000);
     setTimeout(() => ciclo(false), 9000);
     setInterval(() => { cicloDia(false); ciclo(false); }, 30e3);
+    // v4.2: precio y VWAP en vivo (de tu TradingView) se repintan cada 5 s, sin F5
+    setInterval(() => { try { if (gmGet('ng_abierto', true) && !document.hidden) pintar(); } catch (e) {} }, 5000);
     try { GM_addValueChangeListener('ng_dia', (k, o, n, remoto) => { if (remoto) pintar(); }); GM_addValueChangeListener('ng_data', (k, o, n, remoto) => { if (remoto) pintar(); }); } catch (e) {}
     return;
   }
