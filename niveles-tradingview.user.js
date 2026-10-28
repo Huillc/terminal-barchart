@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.2
+// @version      4.3
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -701,7 +701,9 @@
     add(e.flip, 'flip', 'E', 'E·FLIP'); add(e.muro, 'muro', 'E', 'E·MURO'); add(e.iman, 'iman', 'E', 'E·IMÁN*');
     if (it.maxPain.cercano) add(it.maxPain.cercano.strike, 'mp', 'S', 'MAXPAIN ' + it.maxPain.cercano.venc.slice(5));
     if (it.maxPain.mensual) add(it.maxPain.mensual.strike, 'mp', 'E', 'MAXPAIN ' + it.maxPain.mensual.venc.slice(5));
-    const firma = sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
+    // v4.3: botón NIVELES ON/OFF → apagado = se borran FLIP/MURO/IMÁN/MAXPAIN y no se vuelven a dibujar (el precio en vivo sigue)
+    const on = gmGet('ng_lineas', true); if (!on) lineas.length = 0;
+    const firma = (on ? 'on|' : 'off|') + sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
     if (!forzar && firma === ultimaFirma) return;
 
     // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
@@ -733,6 +735,21 @@
   }
 
   try { GM_addValueChangeListener('ng_data', () => dibujar(false)); } catch (e) {}
+  // v4.3: botón para mostrar/ocultar los niveles gamma (FLIP, MURO, IMÁN, MAXPAIN)
+  function botonNiveles() {
+    if (window.top !== window.self || document.getElementById('ng-niv-btn')) return;
+    const b = document.createElement('div'); b.id = 'ng-niv-btn';
+    const pint = () => { const on = gmGet('ng_lineas', true);
+      b.textContent = on ? '● NIVELES ON' : '○ NIVELES OFF';
+      b.title = on ? 'Clic para OCULTAR FLIP · MURO · IMÁN · MAXPAIN' : 'Clic para MOSTRAR FLIP · MURO · IMÁN · MAXPAIN';
+      b.style.cssText = 'position:fixed;left:62px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
+        + 'font:600 11px system-ui,sans-serif;letter-spacing:.3px;border:1px solid ' + (on ? '#ffd166' : '#55606b') + ';'
+        + 'background:rgba(11,21,32,.85);color:' + (on ? '#ffd166' : '#8a96a3') + ';'; };
+    b.onclick = () => { gmSet('ng_lineas', !gmGet('ng_lineas', true)); pint(); dibujar(true); };
+    pint(); document.body.appendChild(b);
+    try { GM_addValueChangeListener('ng_lineas', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
+  }
+  setTimeout(botonNiveles, 3000);
   setInterval(() => dibujar(false), 15e3);
 
   // v3.9: PRECIO EN VIVO desde TU TradingView (la lista de seguimiento que ya ves en pantalla) → se comparte con el Plan del Día.
