@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.0
+// @version      4.1
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -461,7 +461,7 @@
       // apuestas a favor del precio = a favor · apuestas en contra = divergencia · sin apuestas o poco dinero = lo lleva el precio (la toma de ganancias no es apuesta en contra)
       const dirP = V ? V.lado : (sube ? 1 : -1);
       const interp = (vv, a) => { const P = dirP > 0 ? 'Alcista' : 'Bajista';
-        if (!vv) return [dirP, `${P} · lo lleva el precio`];
+        if (!vv) return [0, `Neutral · lo lleva el precio (${P.toLowerCase()})`];   // v4.1: gris = no suma al voto de Opciones
         if (vv === dirP) return [dirP, `${P}${a && a.tg > Math.max(a.alc, a.baj) ? ' con freno' : ''}`];
         return [vv, `${vv > 0 ? 'Alcista' : 'Bajista'} · divergencia`]; };
       const tI = interp(vIn, aI), tF = interp(vFl, aF);
