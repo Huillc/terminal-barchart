@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.7
+// @version      3.8
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -169,9 +169,14 @@
       try { const o = await oandaPrecios(); if (o && Object.keys(o).length) { o._oanda = true; return o; } } catch (e) {}
       const out = {};
       try {
-        const r = await fetch('https://scanner.tradingview.com/cfd/scan', { method: 'POST', body: JSON.stringify({ symbols: { tickers: Object.values(ACTIVOS).map((a) => a.cfd) }, columns: ['close'] }) });
-        const j = await r.json();
-        for (const x of j.data || []) out[x.s] = x.d[0];
+        // v3.8: si TradingView no da el CFD de OANDA (pasa con NAS100), usa el mismo CFD de otro bróker en vivo
+        const ALT = { 'OANDA:NAS100USD': ['PEPPERSTONE:NAS100', 'FOREXCOM:NSXUSD', 'CAPITALCOM:US100'], 'OANDA:US30USD': ['PEPPERSTONE:US30', 'FOREXCOM:DJI'], 'OANDA:XAUUSD': ['PEPPERSTONE:XAUUSD', 'FOREXCOM:XAUUSD'] };
+        const tk = Object.values(ACTIVOS).map((a) => a.cfd); for (const k of tk) tk.push(...(ALT[k] || []));
+        const r = await fetch('https://scanner.tradingview.com/cfd/scan', { method: 'POST', body: JSON.stringify({ symbols: { tickers: tk }, columns: ['close'] }) });
+        const j = await r.json(), raw = {};
+        for (const x of j.data || []) if (x.d[0] > 0) raw[x.s] = x.d[0];
+        out._src = {};
+        for (const a of Object.values(ACTIVOS)) { const k = [a.cfd, ...(ALT[a.cfd] || [])].find((t) => raw[t]); if (k) { out[a.cfd] = raw[k]; out._src[a.cfd] = 'CFD ' + k.split(':')[0].replace('FOREXCOM', 'FOREX.com').replace('CAPITALCOM', 'Capital.com').replace('PEPPERSTONE', 'Pepperstone') + ' (en vivo)'; } }
       } catch (e) {}
       return out;
     }
@@ -231,7 +236,7 @@
           const c = cReal || cIdx || null;
           items[sym] = {
             spot: S, cfdSym: a.cfd, nombre: a.nombre, dec: a.dec,
-            cfd: c, fuenteCfd: cReal ? 'CFD OANDA' : (cIdx ? 'índice ' + a.idx + ' (aprox.)' : null),
+            cfd: c, fuenteCfd: cReal ? ((cfd._src && cfd._src[a.cfd]) || 'CFD OANDA') : (cIdx ? 'índice ' + a.idx + ' (aprox.)' : null),
             ratio: c ? c / S : null,
             opc,
             semana: mapa(ch.filter((x) => semV.includes(x.expirationDate)), S, hoy),
