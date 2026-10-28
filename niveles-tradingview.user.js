@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.9
+// @version      4.0
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -295,8 +295,12 @@
       if (gmGet('ng_oanda', null) && t.min >= 575 && !/Sat|Sun/.test(t.sem)) {
         for (const sym of ['DIA', 'QQQ', 'GLD']) { try { const v = await oandaVelas(ACTIVOS[sym].cfd, t.dia); if (v.length) o5[sym] = v; } catch (e) {} }
       }
+      // v4.0: VWAP en vivo de US30 y ORO desde el escáner público de TradingView (VWAP de la sesión del CFD, desde las 18:00 NY)
+      const sv = {};
+      try { const r = await fetch('https://scanner.tradingview.com/cfd/scan', { method: 'POST', body: JSON.stringify({ symbols: { tickers: ['OANDA:US30USD', 'OANDA:XAUUSD'] }, columns: ['close', 'VWAP', 'update_mode'] }) });
+        const j = await r.json(); for (const x of j.data || []) { const k = x.s === 'OANDA:US30USD' ? 'DIA' : 'GLD'; if (x.d[0] > 0 && x.d[1] > 0) sv[k] = { px: x.d[0], vw: x.d[1], vivo: x.d[2] === 'streaming' }; } } catch (e) {}
       let px = null; if (gmGet('ng_oanda', null)) { try { px = await oandaPrecios(); } catch (e) { px = { _error: e.message }; } }
-      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, pch: pch.s, b5: b5.s, o5, px, barras: b5.s.QQQ || [] };
+      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, pch: pch.s, b5: b5.s, o5, px, sv, barras: b5.s.QQQ || [] };
       gmSet('ng_dia', dd);
       return dd;
     }
@@ -398,7 +402,7 @@
       const t = (c, a, b) => `<span class="ft ${c}"><small>${a}</small>${b}</span>`;
       let h = '<div class="fila">';
       const ult = V && serV && serV.length ? +((serV.slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((serV.slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? (enVivo ? 0 : ny().min - ult) : 0;
-      h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${V.tv ? 'en vivo (tu TradingView)' : atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
+      h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${V.tv ? 'en vivo (tu TradingView)' : atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>${(() => { const z = !V.tv && (dd.sv || {})[sym]; if (!z) return ''; const tl = gmGet('ng_tvlive', null), u = tl && tl.px && tl.px[sym] && Date.now() - tl.t < 60e3 ? tl.px[sym] : z.px, q = (u / z.vw - 1) * 100; return `<i style="color:${q >= 0 ? '#7dffb5' : '#ff9aa5'}">${z.vivo ? 'EN VIVO' : 'escáner'} · VWAP sesión 24 h: ${q >= 0 ? '▲ sobre' : '▼ bajo'} ${Math.abs(q).toFixed(2)} %</i>`; })()}`) : t('fn', 'VWAP', 'se calcula desde la apertura');
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}${N.cache ? `<i>leído hace ${N.cache} min</i>` : ''}`) : t('fn', 'Noticias', 'FALTA<i>abre el terminal general</i>');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
       h += '</div>';
