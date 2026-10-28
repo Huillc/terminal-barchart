@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.8
+// @version      3.9
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -391,12 +391,14 @@
     // Con el precio subiendo, vender calls = toma de ganancias (no cuenta como bajista); con el precio bajando, vender puts = toma de ganancias.
     function apuestas(k, sube) { if (!k) return null; return { alc: k.cc + (sube ? k.pv : 0), baj: k.pc + (sube ? 0 : k.cv), tg: sube ? k.cv : k.pv }; }
     function filaLectura(sym, it, dd) {
-      const serV = (dd.o5 || {})[sym] || (dd.b5 || {})[sym], enVivo = !!(dd.o5 || {})[sym];
-      const V = vwapDe(serV), N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
+      const serV = (dd.o5 || {})[sym] || (dd.b5 || {})[sym], tvL = gmGet('ng_tvlive', null), tvV = tvL && tvL.vw && tvL.vw[sym] && Date.now() - tvL.vw[sym].t < 120e3 ? tvL.vw[sym] : null;
+      const enVivo = !!(dd.o5 || {})[sym] || !!tvV;
+      let V = vwapDe(serV); if (tvV) { const u = (tvL.px && tvL.px[sym]) || tvV.u, lado = Math.sign(u - tvV.vw); V = { vw: tvV.vw, u, lado, pct: (u / tvV.vw - 1) * 100, desde: V ? V.desde : '09:30', tv: true }; }
+      const N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
       const t = (c, a, b) => `<span class="ft ${c}"><small>${a}</small>${b}</span>`;
       let h = '<div class="fila">';
-      const ult = V ? +((serV.slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((serV.slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? (enVivo ? 0 : ny().min - ult) : 0;
-      h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
+      const ult = V && serV && serV.length ? +((serV.slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((serV.slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? (enVivo ? 0 : ny().min - ult) : 0;
+      h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${V.tv ? 'en vivo (tu TradingView)' : atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}${N.cache ? `<i>leído hace ${N.cache} min</i>` : ''}`) : t('fn', 'Noticias', 'FALTA<i>abre el terminal general</i>');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
       h += '</div>';
@@ -584,8 +586,9 @@
         for (const sym of Object.keys(ACTIVOS)) {
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
-          const pxV = dd && dd.px && dd.px[ACTIVOS[sym].cfd];
-          h += `<div class="c"><h4><span>${it.nombre} ${f(pxV || it.cfd, d)}${it.viejo ? ` <small class="am" style="font-size:10.5px">⚠ gamma de las ${it.viejo} (Barchart no respondió; reintenta solo)</small>` : ''}</span><span class="m" style="font-size:11px">${pxV ? '<b style="color:#7dffb5">● OANDA en vivo</b>' : (it.fuenteCfd || '')}</span></h4>` + filaLectura(sym, it, dd);
+          const tvl = gmGet('ng_tvlive', null), tvOk = tvl && Date.now() - tvl.t < 60e3 && tvl.px && tvl.px[sym];
+          const pxV = tvOk ? tvl.px[sym] : (dd && dd.px && dd.px[ACTIVOS[sym].cfd]);
+          h += `<div class="c"><h4><span>${it.nombre} ${f(pxV || it.cfd, d)}${it.viejo ? ` <small class="am" style="font-size:10.5px">⚠ gamma de las ${it.viejo} (Barchart no respondió; reintenta solo)</small>` : ''}</span><span class="m" style="font-size:11px">${tvOk ? '<b style="color:#7dffb5">● en vivo (tu TradingView)</b>' : pxV ? '<b style="color:#7dffb5">● OANDA en vivo</b>' : (it.fuenteCfd || '')}</span></h4>` + filaLectura(sym, it, dd);
           if (E && E.modo) h += `<div><span class="modo ${E.modo === 'AMPLIO' ? 'ru' : 're'}">DÍA ${E.modo}</span> <span class="m">${E.modo === 'AMPLIO' ? 'gamma − (bajo el flip): días más amplios · no comprar caídas ni vender subidas por "barato/caro"' : 'gamma + (sobre el flip): días más frenados · el muro NO es freno (se rompe más que un nivel cualquiera)'}</span>${sym !== 'GLD' ? '<span class="pr ok">rango probado</span>' : '<span class="pr">sin efecto en oro</span>'}</div>`;
           // señales probadas
           if (sym === 'QQQ') {
@@ -723,5 +726,36 @@
 
   try { GM_addValueChangeListener('ng_data', () => dibujar(false)); } catch (e) {}
   setInterval(() => dibujar(false), 15e3);
+
+  // v3.9: PRECIO EN VIVO desde TU TradingView (la lista de seguimiento que ya ves en pantalla) → se comparte con el Plan del Día.
+  // Lee solo lo que tu gráfico ya muestra; no abre conexiones nuevas. Además, si el gráfico está en NAS100/US30/ORO,
+  // calcula el VWAP desde las 09:30 NY con las velas del propio gráfico (temporalidad ≤ 1 h).
+  const LIVE = { 'OANDA:NAS100USD': 'QQQ', 'OANDA:US30USD': 'DIA', 'OANDA:XAUUSD': 'GLD' };
+  const numTV = (t) => { t = String(t || '').replace(/[^\d.,-]/g, ''); if (!t) return null;
+    const a = t.lastIndexOf(','), b = t.lastIndexOf('.'); if (a > -1 && b > -1) t = a > b ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, '');
+    else if (a > -1) t = /^-?\d{1,3}(,\d{3})+$/.test(t) ? t.replace(/,/g, '') : t.replace(',', '.');
+    else if (b > -1 && /^-?\d{1,3}(\.\d{3})+$/.test(t) && t.split('.').length > 2) t = t.replace(/\./g, '');
+    const v = parseFloat(t); return isFinite(v) ? v : null; };
+  function leerVivo() {
+    try {
+      const px = {};
+      for (const row of document.querySelectorAll('[data-symbol-full]')) {
+        const full = row.getAttribute('data-symbol-full'); if (!LIVE[full] || px[LIVE[full]]) continue;
+        const cel = row.querySelector('[class*="last-"], [class*="last"]'); const v = numTV(cel && cel.textContent);
+        if (v > 0) px[LIVE[full]] = v;
+      }
+      const vw = {}; const api = W.TradingViewApi;
+      if (api && api.activeChart) { const ch = api.activeChart(), full = ch.symbol(), etf = LIVE[full];
+        if (etf && +ch.resolution() <= 60) { try { const b = ch._chartWidget.model().mainSeries().bars(); let pv = 0, vv = 0, ult = null;
+          const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          for (let i = b.firstIndex(); i <= b.lastIndex(); i++) { const x = b.valueAt(i); if (!x) continue; const d = new Date(x[0] * 1000);
+            if (d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== hoy || d.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' }) < '09:30') continue;
+            const v = x[5] || 1; pv += (x[2] + x[3] + x[4]) / 3 * v; vv += v; ult = x[4]; }
+          if (vv > 0) { vw[etf] = { vw: pv / vv, u: px[etf] || ult }; if (!px[etf] && ult) px[etf] = ult; } } catch (e) {} } }
+      if (Object.keys(px).length) { const prev = gmGet('ng_tvlive', null) || {}; const vwM = { ...(prev.vw || {}) }; for (const k in vw) vwM[k] = { ...vw[k], t: Date.now() };
+        gmSet('ng_tvlive', { t: Date.now(), px, vw: vwM }); }
+    } catch (e) {}
+  }
+  setInterval(leerVivo, 3000);
   setTimeout(() => dibujar(true), 8000);
 })();
