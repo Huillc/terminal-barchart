@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      3.6
+// @version      3.7
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -12,6 +12,9 @@
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      api-fxtrade.oanda.com
+// @connect      api-fxpractice.oanda.com
 // @run-at       document-idle
 // ==/UserScript==
 (function () {
@@ -135,7 +138,35 @@
       return all;
     }
 
+    // ── v3.7: OANDA en vivo (opcional). El usuario pega SU token en el botón "OANDA"; se guarda solo en su Tampermonkey.
+    const OANDA_INST = { 'OANDA:US30USD': 'US30_USD', 'OANDA:NAS100USD': 'NAS100_USD', 'OANDA:XAUUSD': 'XAU_USD' };
+    function oanda(path) {
+      const cfg = gmGet('ng_oanda', null);
+      if (!cfg || !cfg.tok) return Promise.reject(new Error('sin token'));
+      const host = cfg.env === 'demo' ? 'https://api-fxpractice.oanda.com' : 'https://api-fxtrade.oanda.com';
+      return new Promise((ok, mal) => GM_xmlhttpRequest({ method: 'GET', url: host + path, timeout: 10000, headers: { Authorization: 'Bearer ' + cfg.tok, 'Accept-Datetime-Format': 'UNIX' },
+        onload: (r) => { if (r.status !== 200) return mal(new Error('OANDA ' + r.status)); try { ok(JSON.parse(r.responseText)); } catch (e) { mal(e); } }, onerror: () => mal(new Error('OANDA sin conexión')), ontimeout: () => mal(new Error('OANDA tiempo agotado')) }));
+    }
+    async function oandaCuenta() {
+      const cfg = gmGet('ng_oanda', null); if (!cfg) return null; if (cfg.acc) return cfg.acc;
+      const j = await oanda('/v3/accounts'); const acc = j.accounts && j.accounts[0] && j.accounts[0].id; if (acc) gmSet('ng_oanda', { ...cfg, acc }); return acc;
+    }
+    async function oandaPrecios() {
+      const acc = await oandaCuenta(); if (!acc) return null;
+      const j = await oanda('/v3/accounts/' + acc + '/pricing?instruments=' + Object.values(OANDA_INST).join(','));
+      const out = {}; for (const p of j.prices || []) { const k = Object.keys(OANDA_INST).find((x) => OANDA_INST[x] === p.instrument); const b = +(p.bids[0] || {}).price, a = +(p.asks[0] || {}).price; if (k && b && a) out[k] = (a + b) / 2; }
+      return out;
+    }
+    // velas de 5 min del CFD de hoy desde las 09:30 NY (volumen = ticks), SIN atraso
+    async function oandaVelas(cfdSym, dia) {
+      const j = await oanda('/v3/instruments/' + OANDA_INST[cfdSym] + '/candles?granularity=M5&price=M&count=120');
+      const out = [];
+      for (const c of j.candles || []) { const d = new Date(+c.time * 1000), f = d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), hm = d.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+        if (f === dia && hm >= '09:30') out.push({ hm, o: +c.mid.o, h: +c.mid.h, l: +c.mid.l, c: +c.mid.c, v: c.volume || 1, vivo: !c.complete }); }
+      return out;
+    }
     async function precioCFD() {
+      try { const o = await oandaPrecios(); if (o && Object.keys(o).length) { o._oanda = true; return o; } } catch (e) {}
       const out = {};
       try {
         const r = await fetch('https://scanner.tradingview.com/cfd/scan', { method: 'POST', body: JSON.stringify({ symbols: { tickers: Object.values(ACTIVOS).map((a) => a.cfd) }, columns: ['close'] }) });
@@ -254,7 +285,13 @@
         }
         gmSet('ng_b5', b5);
       }
-      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, pch: pch.s, b5: b5.s, barras: b5.s.QQQ || [] };
+      // v3.7: si hay token de OANDA, el VWAP de la fila se calcula con el CFD real y sin atraso
+      const o5 = {};
+      if (gmGet('ng_oanda', null) && t.min >= 575 && !/Sat|Sun/.test(t.sem)) {
+        for (const sym of ['DIA', 'QQQ', 'GLD']) { try { const v = await oandaVelas(ACTIVOS[sym].cfd, t.dia); if (v.length) o5[sym] = v; } catch (e) {} }
+      }
+      let px = null; if (gmGet('ng_oanda', null)) { try { px = await oandaPrecios(); } catch (e) { px = { _error: e.message }; } }
+      const dd = { t: Date.now(), hora: horaLima(), Q, eod: eod.s, pch: pch.s, b5: b5.s, o5, px, barras: b5.s.QQQ || [] };
       gmSet('ng_dia', dd);
       return dd;
     }
@@ -349,10 +386,11 @@
     // Con el precio subiendo, vender calls = toma de ganancias (no cuenta como bajista); con el precio bajando, vender puts = toma de ganancias.
     function apuestas(k, sube) { if (!k) return null; return { alc: k.cc + (sube ? k.pv : 0), baj: k.pc + (sube ? 0 : k.cv), tg: sube ? k.cv : k.pv }; }
     function filaLectura(sym, it, dd) {
-      const V = vwapDe((dd.b5 || {})[sym]), N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
+      const serV = (dd.o5 || {})[sym] || (dd.b5 || {})[sym], enVivo = !!(dd.o5 || {})[sym];
+      const V = vwapDe(serV), N = noticias(it.nombre), vx = dd.Q['$VIX'], vc = vx ? ((vx.percentChange || 0) > 1 ? vx.percentChange : vx.percentChange * 100) : null;
       const t = (c, a, b) => `<span class="ft ${c}"><small>${a}</small>${b}</span>`;
       let h = '<div class="fila">';
-      const ult = V ? +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((dd.b5[sym].slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? ny().min - ult : 0;
+      const ult = V ? +((serV.slice(-1)[0] || {}).hm || '00:00').slice(0, 2) * 60 + +((serV.slice(-1)[0] || {}).hm || '00:00').slice(3) + 5 : 0, atraso = V ? (enVivo ? 0 : ny().min - ult) : 0;
       h += V ? t(V.lado > 0 ? 'fu' : 'fd', 'VWAP ' + it.nombre, `${V.lado > 0 ? '▲ SOBRE' : '▼ BAJO'} ${Math.abs(V.pct).toFixed(2)} %<i>desde ${limaDeNY(+V.desde.slice(0, 2) * 60 + +V.desde.slice(3))} · ${atraso > 8 ? 'dato de hace ' + atraso + ' min' : 'al día'}</i>`) : t('fn', 'VWAP', 'se calcula desde la apertura');
       h += N ? t(N.score >= 15 ? 'fu' : N.score <= -15 ? 'fd' : 'fn', 'Noticias', `${N.score > 0 ? '+' : ''}${N.score} ${N.tono}${N.cache ? `<i>leído hace ${N.cache} min</i>` : ''}`) : t('fn', 'Noticias', 'FALTA<i>abre el terminal general</i>');
       if (sym !== 'GLD') h += vc != null ? t(vc <= -3 ? 'fu' : vc >= 3 ? 'fd' : 'fn', 'VIX', `${vc > 0 ? '+' : ''}${vc.toFixed(1)} %`) : '';
@@ -534,14 +572,15 @@
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
-      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
+      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span>${(() => { const o = gmGet('ng_oanda', null); return `<button id="oa" title="Conectar precio en vivo de OANDA">${o ? (dd && dd.px && dd.px._error ? '⚠ OANDA' : '● OANDA') : 'OANDA'}</button>`; })()}<button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
       if (abierto && data && dd) {
         const cap = gmGet('ng_capital', null);
         h += '<div class="g">';
         for (const sym of Object.keys(ACTIVOS)) {
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
-          h += `<div class="c"><h4><span>${it.nombre} ${f(it.cfd, d)}${it.viejo ? ` <small class="am" style="font-size:10.5px">⚠ gamma de las ${it.viejo} (Barchart no respondió; reintenta solo)</small>` : ''}</span><span class="m" style="font-size:11px">${it.fuenteCfd || ''}</span></h4>` + filaLectura(sym, it, dd);
+          const pxV = dd && dd.px && dd.px[ACTIVOS[sym].cfd];
+          h += `<div class="c"><h4><span>${it.nombre} ${f(pxV || it.cfd, d)}${it.viejo ? ` <small class="am" style="font-size:10.5px">⚠ gamma de las ${it.viejo} (Barchart no respondió; reintenta solo)</small>` : ''}</span><span class="m" style="font-size:11px">${pxV ? '<b style="color:#7dffb5">● OANDA en vivo</b>' : (it.fuenteCfd || '')}</span></h4>` + filaLectura(sym, it, dd);
           if (E && E.modo) h += `<div><span class="modo ${E.modo === 'AMPLIO' ? 'ru' : 're'}">DÍA ${E.modo}</span> <span class="m">${E.modo === 'AMPLIO' ? 'gamma − (bajo el flip): días más amplios · no comprar caídas ni vender subidas por "barato/caro"' : 'gamma + (sobre el flip): días más frenados · el muro NO es freno (se rompe más que un nivel cualquiera)'}</span>${sym !== 'GLD' ? '<span class="pr ok">rango probado</span>' : '<span class="pr">sin efecto en oro</span>'}</div>`;
           // señales probadas
           if (sym === 'QQQ') {
@@ -572,6 +611,14 @@
       sh.innerHTML = h;
       sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', !gmGet('ng_abierto', true)); pintar(); };
       sh.getElementById('ac').onclick = () => { ciclo(true); cicloDia(true); };
+      { const b = sh.getElementById('oa'); if (b) b.onclick = () => {
+        const o = gmGet('ng_oanda', null);
+        if (o && !confirm('OANDA ya está conectado (' + (o.env === 'demo' ? 'demo' : 'real') + ').\nAceptar = cambiar token · Cancelar = dejarlo')) return;
+        const tok = (prompt('Pega tu token de API de OANDA (Mi cuenta → Herramientas → API). Se guarda SOLO en tu Tampermonkey. Vacío = desconectar.') || '').trim();
+        if (!tok) { gmSet('ng_oanda', null); pintar('· OANDA desconectado'); return; }
+        const env = confirm('¿El token es de tu cuenta REAL?\nAceptar = real · Cancelar = demo') ? 'real' : 'demo';
+        gmSet('ng_oanda', { tok, env }); pintar('· conectando OANDA…'); cicloDia(true);
+      }; }
       const ci = sh.getElementById('cap'); if (ci) ci.onchange = () => { const v = +ci.value; gmSet('ng_capital', v > 0 ? v : null); pintar(); };
     }
 
