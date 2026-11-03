@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.7.3
+// @version      4.7.4
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -576,6 +576,11 @@
       const gat = (manana ? hhM : hh5) - 2.5 * a;
       return { gat, manana, atr: a, sma200, hh5, caidaATR, ok, señal: ok.caida && ok.tend, cerca: !ok.caida && caidaATR > 2 && ok.tend, obj: px + 0.5 * a, stop: px - 4 * a, px };
     }
+    function avisar(id, tit, txt) {
+      const A = gmGet('ng_avisos', {}); if (A[id]) return; A[id] = Date.now(); gmSet('ng_avisos', A);
+      try { const ac = new (window.AudioContext || window.webkitAudioContext)(); [0, 0.35, 0.7].forEach((t) => { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = 880; o.connect(g); g.connect(ac.destination); g.gain.setValueAtTime(0.25, ac.currentTime + t); g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + t + 0.3); o.start(ac.currentTime + t); o.stop(ac.currentTime + t + 0.3); }); } catch (e) {}
+      try { if (window.Notification && Notification.permission === 'granted') new Notification(tit, { body: txt }); } catch (e) {}
+    }
     function rutinaHTML(data, dd) {
       const hoy = hoyNY(); let R0 = gmGet('ng_rutina', null); if (!R0 || R0.dia !== hoy) { R0 = { dia: hoy, m: {} }; gmSet('ng_rutina', R0); }
       const ck = (k, txt, sub) => `<label style="display:flex;gap:6px;align-items:flex-start;margin:3px 0;cursor:pointer"><input type="checkbox" class="rt" data-k="${k}" ${R0.m[k] ? 'checked' : ''} style="width:auto;margin-top:2px"><span><b>${txt}</b><br><span class="m">${sub}</span></span></label>`;
@@ -592,10 +597,13 @@
         // v4.7.3: línea ENTRAR por activo (precio del CFD)
         { const g = c.gat, okG = g > c.sma200, ob = g + 0.5 * c.atr, st = g - 4 * c.atr;
           p2e += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${c.señal && !cerrado() ? '#2fbf71' : okG ? '#3b5878' : '#2a3340'};background:${c.señal && !cerrado() ? '#0c2a1b' : '#0b1118'}"><b>${nm}</b> · ` +
-            (c.señal && !cerrado() ? `<b class="up">▲ ENTRAR AHORA (compra al cierre ${limaDeNY(955)} Lima) ~${k ? f(c.px * k, d) : '—'}</b> · objetivo <b>${k ? f(c.obj * k, d) : '—'}</b> · stop <b>${k ? f(c.stop * k, d) : '—'}</b> · máx 20 días`
+            (c.señal && !cerrado() && ny().min >= 945 ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${k ? f(c.px * k, d) : '—'}</b> (confirmado al cierre: entra antes de las ${limaDeNY(959)} Lima) · objetivo <b>${k ? f(c.obj * k, d) : '—'}</b> · stop <b>${k ? f(c.stop * k, d) : '—'}</b> · máx 20 días`
+            : c.señal && !cerrado() ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(945)} y ${limaDeNY(959)} Lima (cierre); si sigue así, aquí dirá "AHORA PUEDES ENTRAR" y sonará un aviso · hoy ~${k ? f(c.px * k, d) : '—'}, objetivo ${k ? f(c.obj * k, d) : '—'}, stop ${k ? f(c.stop * k, d) : '—'}</span>`
             : !c.ok.tend ? `<b class="m">▲ COMPRA: no</b> <span class="m">(bajo la media 200 = ${k ? f(c.sma200 * k, d) : '—'}) · </span><b class="m">▼ VENTA: no</b> <span class="m">— la venta espejo (subida rápida bajo la media 200) se probó 2007–26 y PIERDE (−0,14 a −0,79 %/op) → hoy no hay operación de esta estrategia</span>`
             : !okG ? `<span class="m">▲ COMPRA no aplica ${c.manana ? 'mañana' : 'hoy'}: el gatillo (${k ? f(g * k, d) : '—'}) queda bajo la media 200 (${k ? f(c.sma200 * k, d) : '—'}) · ▼ VENTA: no (probada, pierde)</span>`
-            : `<b class="am">▲ ENTRAR ${c.manana ? 'MAÑANA' : 'HOY'} solo si cierra en ${k ? f(g * k, d) : '—'} o menos</b> (compra al cierre, ${limaDeNY(955)} Lima) · objetivo ≈ ${k ? f(ob * k, d) : '—'} · stop ≈ ${k ? f(st * k, d) : '—'} · <span class="m">ahora ${k ? f(c.px * k, d) : '—'}, falta ${k ? f((c.px - g) * k, d) : '—'}</span>`) + '</div>'; }
+            : `<b class="m">○ AÚN NO · no entres</b> <span class="m">— el terminal te avisará "AHORA PUEDES ENTRAR" solo si ${c.manana ? 'mañana' : 'hoy'} cierra en ${k ? f(g * k, d) : '—'} o menos (ahora ${k ? f(c.px * k, d) : '—'}, falta ${k ? f((c.px - g) * k, d) : '—'}) · objetivo ≈ ${k ? f(ob * k, d) : '—'} · stop ≈ ${k ? f(st * k, d) : '—'}</span>`) + '</div>'; }
+        // v4.7.4: aviso (sonido + notificación) una sola vez por día y activo cuando se confirma
+        if (c.señal && !cerrado() && ny().min >= 945) avisar('cd_' + sym + '_' + hoy, `✅ ${nm}: AHORA PUEDES ENTRAR (compra)`, `~${k ? f(c.px * k, d) : ''} · objetivo ${k ? f(c.obj * k, d) : ''} · stop ${k ? f(c.stop * k, d) : ''} · antes de las ${limaDeNY(959)} Lima`);
         if (c.señal && !cerrado()) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
         const E = it && !it.error ? escenarios(sym, it, dd) : null;
         if (E && E.modo) p5 += pill(E.modo === 'AMPLIO' ? 'fd' : 'fu', `${nm} día <b>${E.modo}</b>`);
@@ -605,7 +613,7 @@
       if (Pn.señal) autos++;
       const p4 = P ? pill(P.fin ? 'fn' : P.imp >= 3 ? 'fd' : 'fa', P.fin ? 'ya salieron los datos de hoy' : `${P.h} Lima · ${P.n} ${P.imp >= 3 ? '(FUERTE: no entrar 15 min antes/después)' : ''}`) : pill('fn', 'sin calendario (abre el Terminal)');
       const ver = autos ? `<b class="up">HOY HAY SEÑAL MEDIDA</b> — opera solo esa, con su stop y su objetivo` : buenas >= 2 ? `<b class="am">SIN SEÑAL MEDIDA</b> — si operas: tamaño reducido, solo con retest + confirmación y a favor de la media 200` : `<b class="dn">DÍA DE OBSERVAR</b> — mercado bajo la media 200 y sin señal: mejor no operar o tamaño mínimo`;
-      let h = `<div class="c" style="flex-basis:100%"><h4><span>✅ RUTINA DE LA MAÑANA · 8 puntos</span><span class="m" style="font-size:11px">1–5 automáticos · 6–8 los marcas tú · se reinicia cada día</span></h4>`;
+      let h = `<div class="c" style="flex-basis:100%"><h4><span>✅ RUTINA DE LA MAÑANA · 8 puntos</span><span class="m" style="font-size:11px">1–5 automáticos · 6–8 los marcas tú · se reinicia cada día ${window.Notification && Notification.permission !== 'granted' ? '<button id="ntf">🔔 activar avisos</button>' : '🔔 avisos activos'}</span></h4>`;
       h += `<div class="gen" style="color:#cfe1ff">${ver}</div>`;
       h += fila(1, 'Tendencia diaria (media de 200)', p1 + '<span class="m"> sobre = solo compras en caídas · bajo = operar menos</span>');
       h += fila(2, 'Señal de alto acierto: caída rápida', p2 + p2e + '<span class="pr">EN PRUEBA</span> <span class="m">caída &gt; 2,5 ATR desde el máx. de 5 días + sobre media 200 · ETF 2007–26: ~92 % de acierto en los 3 · obj +0,5 ATR, stop −4 ATR: <b>cada pérdida borra ~8 ganancias</b>, no muevas el stop</span>');
@@ -706,6 +714,7 @@
         const env = confirm('¿El token es de tu cuenta REAL?\nAceptar = real · Cancelar = demo') ? 'real' : 'demo';
         gmSet('ng_oanda', { tok, env }); pintar('· conectando OANDA…'); cicloDia(true);
       }; }
+      { const nb = sh.getElementById('ntf'); if (nb) nb.onclick = () => { try { Notification.requestPermission().then(() => pintar()); } catch (e) {} }; }
       for (const x of sh.querySelectorAll('input.rt')) x.onchange = () => { const R0 = gmGet('ng_rutina', { dia: hoyNY(), m: {} }); R0.m[x.dataset.k] = x.checked; gmSet('ng_rutina', R0); };
       const ci = sh.getElementById('cap'); if (ci) ci.onchange = () => { const v = +ci.value; gmSet('ng_capital', v > 0 ? v : null); pintar(); };
     }
