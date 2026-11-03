@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.7.1
+// @version      4.7.2
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -648,6 +648,8 @@
       if (abierto && data && dd) {
         const cap = gmGet('ng_capital', null);
         h += '<div class="g">';
+        try {   // v4.7.2: la rutina va ARRIBA, antes de las tarjetas
+          h += rutinaHTML(data, dd); } catch (e) { h += `<div class="c" style="flex-basis:100%"><span class="dn">Rutina: ${e.message}</span></div>`; }
         for (const sym of Object.keys(ACTIVOS)) {
           const it = data.items[sym]; if (!it || it.error) { h += `<div class="c"><h4>${ACTIVOS[sym].nombre}</h4><span class="dn">${it ? it.error : 'sin datos'}</span></div>`; continue; }
           const d = it.dec, E = escenarios(sym, it, dd), p = PASO[sym];
@@ -676,7 +678,6 @@
           if (E) h += `<div class="niv">${E.N.map((x) => `<span${Math.abs(x.v - E.px) < p.stop ? ' style="color:#fff"' : ''}>${x.n} <b>${f(x.v, d)}</b></span>`).join('')}</div>`;
           h += '</div>';
         }
-        try { h += rutinaHTML(data, dd); } catch (e) { h += `<div class="c" style="flex-basis:100%"><span class="dn">Rutina: ${e.message}</span></div>`; }
         const D = evaluarDiario(dd), hechos = D.filter((x) => x.r != null);
         const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' || tipo === 'caida' ? ' %' : ' R'}` : 'aún sin resultados'; };
         h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · caída rápida: ${txt('caida')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
