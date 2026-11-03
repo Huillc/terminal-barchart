@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.7.2
+// @version      4.7.3
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -571,21 +571,31 @@
       const altos = Ec.slice(vivo ? -4 : -5).map((x) => x.h).concat(vivo && q.highPrice > 0 ? [q.highPrice] : []);
       const hh5 = Math.max(...altos), caidaATR = (hh5 - px) / a;
       const ok = { caida: caidaATR > 2.5, tend: px > sma200 };
-      return { atr: a, sma200, hh5, caidaATR, ok, señal: ok.caida && ok.tend, cerca: !ok.caida && caidaATR > 2 && ok.tend, obj: px + 0.5 * a, stop: px - 4 * a, px };
+      // v4.7.3: precio GATILLO = dónde tendría que cerrar para dar señal (hoy, o mañana si ya cerró)
+      const manana = cerrado() || !vivo, hhM = Math.max(...Ec.slice(vivo ? -3 : -4).map((x) => x.h).concat(vivo && q.highPrice > 0 ? [q.highPrice] : []));
+      const gat = (manana ? hhM : hh5) - 2.5 * a;
+      return { gat, manana, atr: a, sma200, hh5, caidaATR, ok, señal: ok.caida && ok.tend, cerca: !ok.caida && caidaATR > 2 && ok.tend, obj: px + 0.5 * a, stop: px - 4 * a, px };
     }
     function rutinaHTML(data, dd) {
       const hoy = hoyNY(); let R0 = gmGet('ng_rutina', null); if (!R0 || R0.dia !== hoy) { R0 = { dia: hoy, m: {} }; gmSet('ng_rutina', R0); }
       const ck = (k, txt, sub) => `<label style="display:flex;gap:6px;align-items:flex-start;margin:3px 0;cursor:pointer"><input type="checkbox" class="rt" data-k="${k}" ${R0.m[k] ? 'checked' : ''} style="width:auto;margin-top:2px"><span><b>${txt}</b><br><span class="m">${sub}</span></span></label>`;
       const fila = (n, txt, cont) => `<div style="margin:5px 0;padding:5px 7px;background:#0b1118;border-radius:6px"><b style="color:#9fc5ff">${n}.</b> <b>${txt}</b><div style="margin-top:2px">${cont}</div></div>`;
       const pill = (cls, t) => `<span class="fo ${cls}" style="margin-right:5px">${t}</span>`;
-      let p1 = '', p2 = '', p5 = '', autos = 0, buenas = 0;
+      let p1 = '', p2 = '', p2e = '', p5 = '', autos = 0, buenas = 0;
       for (const sym of Object.keys(ACTIVOS)) {
         const it = data.items[sym], k = it && it.ratio, nm = ACTIVOS[sym].nombre, d = ACTIVOS[sym].dec, c = caida(dd, sym);
         if (c.estado) { p1 += pill('fn', nm + ': faltan datos'); continue; }
         p1 += pill(c.ok.tend ? 'fu' : 'fd', `${nm} <b>${c.ok.tend ? 'sobre' : 'bajo'}</b> media 200`);
         if (c.ok.tend) buenas++;
         p2 += pill(c.señal ? 'fu' : c.cerca ? 'fa' : 'fn', c.señal ? `${nm} <b>● SEÑAL${cerrado() ? ' DE HOY</b> (la entrada era al cierre: ya pasó; no entrar tarde)<b>' : ''}</b> caída ${c.caidaATR.toFixed(1)} ATR · comprar al cierre ~${k ? f(c.px * k, d) : '—'} · obj ${k ? f(c.obj * k, d) : '—'} · stop ${k ? f(c.stop * k, d) : '—'} · máx 20 días`
-          : c.cerca ? `${nm} <b>◐ cerca</b> caída ${c.caidaATR.toFixed(1)} ATR (necesita &gt; 2,5)` : `${nm} ○ caída ${c.caidaATR.toFixed(1)} ATR`);
+          : `${nm} ${c.cerca ? '<b>◐ cerca</b>' : '○'} caída ${c.caidaATR.toFixed(1)} ATR`);
+        // v4.7.3: línea ENTRAR por activo (precio del CFD)
+        { const g = c.gat, okG = g > c.sma200, ob = g + 0.5 * c.atr, st = g - 4 * c.atr;
+          p2e += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${c.señal && !cerrado() ? '#2fbf71' : okG ? '#3b5878' : '#2a3340'};background:${c.señal && !cerrado() ? '#0c2a1b' : '#0b1118'}"><b>${nm}</b> · ` +
+            (c.señal && !cerrado() ? `<b class="up">▲ ENTRAR AHORA (compra al cierre ${limaDeNY(955)} Lima) ~${k ? f(c.px * k, d) : '—'}</b> · objetivo <b>${k ? f(c.obj * k, d) : '—'}</b> · stop <b>${k ? f(c.stop * k, d) : '—'}</b> · máx 20 días`
+            : !c.ok.tend ? `<b class="m">▲ COMPRA: no</b> <span class="m">(bajo la media 200 = ${k ? f(c.sma200 * k, d) : '—'}) · </span><b class="m">▼ VENTA: no</b> <span class="m">— la venta espejo (subida rápida bajo la media 200) se probó 2007–26 y PIERDE (−0,14 a −0,79 %/op) → hoy no hay operación de esta estrategia</span>`
+            : !okG ? `<span class="m">▲ COMPRA no aplica ${c.manana ? 'mañana' : 'hoy'}: el gatillo (${k ? f(g * k, d) : '—'}) queda bajo la media 200 (${k ? f(c.sma200 * k, d) : '—'}) · ▼ VENTA: no (probada, pierde)</span>`
+            : `<b class="am">▲ ENTRAR ${c.manana ? 'MAÑANA' : 'HOY'} solo si cierra en ${k ? f(g * k, d) : '—'} o menos</b> (compra al cierre, ${limaDeNY(955)} Lima) · objetivo ≈ ${k ? f(ob * k, d) : '—'} · stop ≈ ${k ? f(st * k, d) : '—'} · <span class="m">ahora ${k ? f(c.px * k, d) : '—'}, falta ${k ? f((c.px - g) * k, d) : '—'}</span>`) + '</div>'; }
         if (c.señal && !cerrado()) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
         const E = it && !it.error ? escenarios(sym, it, dd) : null;
         if (E && E.modo) p5 += pill(E.modo === 'AMPLIO' ? 'fd' : 'fu', `${nm} día <b>${E.modo}</b>`);
@@ -598,7 +608,7 @@
       let h = `<div class="c" style="flex-basis:100%"><h4><span>✅ RUTINA DE LA MAÑANA · 8 puntos</span><span class="m" style="font-size:11px">1–5 automáticos · 6–8 los marcas tú · se reinicia cada día</span></h4>`;
       h += `<div class="gen" style="color:#cfe1ff">${ver}</div>`;
       h += fila(1, 'Tendencia diaria (media de 200)', p1 + '<span class="m"> sobre = solo compras en caídas · bajo = operar menos</span>');
-      h += fila(2, 'Señal de alto acierto: caída rápida', p2 + '<br><span class="pr">EN PRUEBA</span> <span class="m">caída &gt; 2,5 ATR desde el máx. de 5 días + sobre media 200 · ETF 2007–26: ~92 % de acierto en los 3 · obj +0,5 ATR, stop −4 ATR: <b>cada pérdida borra ~8 ganancias</b>, no muevas el stop</span>');
+      h += fila(2, 'Señal de alto acierto: caída rápida', p2 + p2e + '<span class="pr">EN PRUEBA</span> <span class="m">caída &gt; 2,5 ATR desde el máx. de 5 días + sobre media 200 · ETF 2007–26: ~92 % de acierto en los 3 · obj +0,5 ATR, stop −4 ATR: <b>cada pérdida borra ~8 ganancias</b>, no muevas el stop</span>');
       h += fila(3, 'Rebote de pánico (NAS100)', p3 + '<span class="m"> · 2007–26: 71 %, +0,31 %/op</span>');
       h += fila(4, 'Calendario', p4);
       h += fila(5, 'Tipo de día (gamma)', (p5 || pill('fn', 'calculando…')) + '<span class="m"> amplio = stops más anchos, no comprar "barato" · frenado = rangos</span>');
