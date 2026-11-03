@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.7
+// @version      4.7.1
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -266,7 +266,7 @@
       const q = await api('/proxies/core-api/v1/quotes/get', { symbols: 'DIA,QQQ,GLD,$VIX,HYG,LQD,YM*0,NQ*0,GC*0', fields: 'symbol,lastPrice,previousPrice,openPrice,highPrice,lowPrice,percentChange', raw: 1 });
       const Q = {}; for (const x of q.data || []) { const r = x.raw || x; Q[r.symbol] = r; }
       let eod = gmGet('ng_eod', null);
-      if (!eod || eod.dia !== t.dia) {
+      if (!eod || eod.dia !== t.dia || !(eod.s.DIA && eod.s.DIA.length >= 205 && eod.s.GLD && eod.s.GLD.length >= 205)) {   // v4.7.1: 230 días para la media 200
         eod = { dia: t.dia, s: {} };
         for (const [s, n] of [['QQQ', 230], ['DIA', 230], ['GLD', 230], ['HYG', 60], ['LQD', 60]]) {
           try { eod.s[s] = (await serie('/proxies/timeseries/queryeod.ashx', { symbol: s, data: 'daily', maxrecords: n, order: 'asc', dividends: 'false', backadjust: 'false' })).filter((c) => c.length >= 6).map((c) => ({ d: c[1], h: +c[3], l: +c[4], c: +c[5] })); } catch (e) {}
@@ -584,9 +584,9 @@
         if (c.estado) { p1 += pill('fn', nm + ': faltan datos'); continue; }
         p1 += pill(c.ok.tend ? 'fu' : 'fd', `${nm} <b>${c.ok.tend ? 'sobre' : 'bajo'}</b> media 200`);
         if (c.ok.tend) buenas++;
-        p2 += pill(c.señal ? 'fu' : c.cerca ? 'fa' : 'fn', c.señal ? `${nm} <b>● SEÑAL</b> caída ${c.caidaATR.toFixed(1)} ATR · comprar al cierre ~${k ? f(c.px * k, d) : '—'} · obj ${k ? f(c.obj * k, d) : '—'} · stop ${k ? f(c.stop * k, d) : '—'} · máx 20 días`
+        p2 += pill(c.señal ? 'fu' : c.cerca ? 'fa' : 'fn', c.señal ? `${nm} <b>● SEÑAL${cerrado() ? ' DE HOY</b> (la entrada era al cierre: ya pasó; no entrar tarde)<b>' : ''}</b> caída ${c.caidaATR.toFixed(1)} ATR · comprar al cierre ~${k ? f(c.px * k, d) : '—'} · obj ${k ? f(c.obj * k, d) : '—'} · stop ${k ? f(c.stop * k, d) : '—'} · máx 20 días`
           : c.cerca ? `${nm} <b>◐ cerca</b> caída ${c.caidaATR.toFixed(1)} ATR (necesita &gt; 2,5)` : `${nm} ○ caída ${c.caidaATR.toFixed(1)} ATR`);
-        if (c.señal) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
+        if (c.señal && !cerrado()) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
         const E = it && !it.error ? escenarios(sym, it, dd) : null;
         if (E && E.modo) p5 += pill(E.modo === 'AMPLIO' ? 'fd' : 'fu', `${nm} día <b>${E.modo}</b>`);
       }
