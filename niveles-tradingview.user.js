@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.4
+// @version      4.5
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -742,7 +742,7 @@
     const pint = () => { const on = gmGet('ng_lineas', true);
       b.textContent = on ? '● NIVELES ON' : '○ NIVELES OFF';
       b.title = on ? 'Clic para OCULTAR FLIP · MURO · IMÁN · MAXPAIN' : 'Clic para MOSTRAR FLIP · MURO · IMÁN · MAXPAIN';
-      b.style.cssText = 'position:fixed;left:62px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
+      b.style.cssText = 'position:fixed;left:420px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
         + 'font:600 11px system-ui,sans-serif;letter-spacing:.3px;border:1px solid ' + (on ? '#ffd166' : '#55606b') + ';'
         + 'background:rgba(11,21,32,.85);color:' + (on ? '#ffd166' : '#8a96a3') + ';'; };
     b.onclick = () => { gmSet('ng_lineas', !gmGet('ng_lineas', true)); pint(); dibujar(true); };
@@ -766,7 +766,7 @@
     const pint = () => { const p = liqPanel(); b.style.display = p ? '' : 'none'; if (!p) return; const on = p.v !== 'Oculto';
       b.textContent = on ? '● PANEL ON' : '○ PANEL OFF';
       b.title = on ? 'Clic para OCULTAR el panel de Liquidez · Barridos' : 'Clic para MOSTRAR el panel de Liquidez · Barridos';
-      b.style.cssText = 'position:fixed;left:62px;bottom:84px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
+      b.style.cssText = 'position:fixed;left:540px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
         + 'font:600 11px system-ui,sans-serif;letter-spacing:.3px;border:1px solid ' + (on ? '#e040fb' : '#55606b') + ';'
         + 'background:rgba(11,21,32,.85);color:' + (on ? '#e040fb' : '#8a96a3') + ';'; };
     b.onclick = () => { const p = liqPanel(); if (!p) return;
