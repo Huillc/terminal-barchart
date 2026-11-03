@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.5
+// @version      4.6
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -29,7 +29,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 33; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 34; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -223,13 +223,20 @@
             opc.inus = { n: inu.length, calls: ic, puts: ip, alc: ia, baj: ib, k4 };
             if (mercadoAbierto()) {
               // v3.0: mismo filtro que la página "Options Flow" de Barchart: prima > $20 k, vence en < 10 días, tamaño > 50
-              const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,side,premium,tradeTime,tradeSize,dte', raw: 1, limit: 500, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,20000)': '', 'lt(dte,10)': '' });
+              const fj = await api('/proxies/core-api/v1/options/flow', { symbol: sym, fields: 'symbolType,strikePrice,side,premium,tradeTime,tradeSize,dte', raw: 1, limit: 500, orderBy: 'tradeTime', orderDir: 'desc', 'gt(premium,20000)': '', 'lt(dte,10)': '' });
               const F = (fj.data || []).map((x) => x.raw || x).filter((o) => (o.tradeSize || 0) > 50 && new Date(o.tradeTime * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === hoy);
               let alc = 0, baj = 0; const k4 = { cc: 0, cv: 0, pc: 0, pv: 0 };
               for (const o of F) { const c = o.symbolType === 'Call', ask = o.side === 'ask', bid = o.side === 'bid';
                 if ((c && ask) || (!c && bid)) alc += o.premium; else if ((!c && ask) || (c && bid)) baj += o.premium;
                 if (c && ask) k4.cc += o.premium; if (c && bid) k4.cv += o.premium; if (!c && ask) k4.pc += o.premium; if (!c && bid) k4.pv += o.premium; }
               opc.flujo = { n: F.length, alc, baj, k4 };
+              // v4.6: FLUJO GRANDE por strike (dinero de hoy, prima > $20k) → los 3 strikes con más prima cerca del precio (±4 %). SIN PROBAR.
+              const m = {};
+              for (const o of F) { if (!(o.strikePrice > 0) || Math.abs(o.strikePrice / S - 1) > 0.04) continue;
+                const c = o.symbolType === 'Call', z = (m[o.strikePrice] = m[o.strikePrice] || { k: o.strikePrice, t: 0, a: 0, b: 0 }); z.t += o.premium;
+                if ((c && o.side === 'ask') || (!c && o.side === 'bid')) z.a += o.premium; else if ((!c && o.side === 'ask') || (c && o.side === 'bid')) z.b += o.premium; }
+              const top = Object.values(m).filter((z) => z.t >= 100000).sort((x, y) => y.t - x.t).slice(0, 3);
+              const FS = gmGet('ng_flujoS', {}); FS[sym] = { dia: hoy, L: top }; gmSet('ng_flujoS', FS);
             }
           } catch (e) {}
           const a = ACTIVOS[sym], cReal = cfd[a.cfd], cIdx = spot[a.idx];
@@ -674,7 +681,7 @@
   };
   const ESTILO = {
     // Semana: línea continua · Estructural: punteada
-    flip: { col: '#ffd166' }, muro: { col: '#2fbf71' }, iman: { col: '#ff5c6c' }, mp: { col: '#9aa7b4' },
+    flip: { col: '#ffd166' }, muro: { col: '#2fbf71' }, iman: { col: '#ff5c6c' }, mp: { col: '#9aa7b4' }, flujo: { col: '#00b0ff' },
   };
   const idsGuardados = () => { try { return JSON.parse(localStorage.getItem('ng_ids') || '{}'); } catch (e) { return {}; } };
   const guardarIds = (o) => { try { localStorage.setItem('ng_ids', JSON.stringify(o)); } catch (e) {} };
@@ -701,6 +708,10 @@
     add(e.flip, 'flip', 'E', 'E·FLIP'); add(e.muro, 'muro', 'E', 'E·MURO'); add(e.iman, 'iman', 'E', 'E·IMÁN*');
     if (it.maxPain.cercano) add(it.maxPain.cercano.strike, 'mp', 'S', 'MAXPAIN ' + it.maxPain.cercano.venc.slice(5));
     if (it.maxPain.mensual) add(it.maxPain.mensual.strike, 'mp', 'E', 'MAXPAIN ' + it.maxPain.mensual.venc.slice(5));
+    // v4.6: FLUJO GRANDE de opciones de hoy (o del último día con mercado abierto) · ▲ compran calls/venden puts · ▼ compran puts/venden calls · ◆ mixto
+    { const fz = (gmGet('ng_flujoS', {}) || {})[etf];
+      const M = (v) => v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M' : '$' + Math.round(v / 1e3) + 'k';
+      if (fz && fz.L) for (const z of fz.L) add(z.k, 'flujo', 'S', 'F·FLUJO ' + fz.dia.slice(5) + ' ' + M(z.t) + ' ' + (z.a > 1.5 * z.b ? '▲' : z.b > 1.5 * z.a ? '▼' : '◆')); }
     // v4.3: botón NIVELES ON/OFF → apagado = se borran FLIP/MURO/IMÁN/MAXPAIN y no se vuelven a dibujar (el precio en vivo sigue)
     const on = gmGet('ng_lineas', true); if (!on) lineas.length = 0;
     const firma = (on ? 'on|' : 'off|') + sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
@@ -709,7 +720,7 @@
     // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
     // porque TradingView cambia el id interno al recargar el gráfico guardado y así quedaban líneas viejas duplicadas.
     const ids = idsGuardados();
-    const MIA = /^(S·|E·|MAXPAIN )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
+    const MIA = /^(S·|E·|F·|MAXPAIN )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
     for (const x of ch.getAllShapes() || []) {
       if (x.name !== 'horizontal_line') continue;
       let txt = '';
@@ -722,7 +733,7 @@
         const id = await ch.createShape({ price: l.p }, {
           shape: 'horizontal_line', lock: true, disableSelection: false, disableSave: false, text: l.texto,
           overrides: {
-            linecolor: ESTILO[l.tipo].col, linewidth: l.mapaN === 'S' ? 2 : 1, linestyle: l.mapaN === 'S' ? 0 : 2,
+            linecolor: ESTILO[l.tipo].col, linewidth: l.tipo === 'flujo' ? 3 : l.mapaN === 'S' ? 2 : 1, linestyle: l.tipo === 'flujo' ? 1 : l.mapaN === 'S' ? 0 : 2,
             showLabel: true, text: l.texto, textcolor: ESTILO[l.tipo].col, fontsize: 11,
             horzLabelsAlign: l.mapaN === 'S' ? 'right' : 'left', vertLabelsAlign: 'top',
           },
