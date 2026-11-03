@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.3
+// @version      4.4
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -750,6 +750,32 @@
     try { GM_addValueChangeListener('ng_lineas', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
   }
   setTimeout(botonNiveles, 3000);
+  // v4.4: botón PANEL ON/OFF → oculta o muestra el panel del indicador "Liquidez · Barridos" (cambia su opción "Panel resumen: tamaño")
+  function liqPanel() {
+    try {
+      const ch = W.TradingViewApi && W.TradingViewApi.activeChart && W.TradingViewApi.activeChart(); if (!ch) return null;
+      const s = ch.getAllStudies().find((x) => /Liquidez/i.test(x.name)); if (!s) return null;
+      const st = ch.getStudyById(s.id); const inf = st.getInputsInfo(); const it = inf.find((x) => /Panel resumen: tama/i.test(x.name)); if (!it) return null;
+      const v = (st.getInputValues().find((x) => x.id === it.id) || {}).value;
+      return { st, id: it.id, v };
+    } catch (e) { return null; }
+  }
+  function botonPanel() {
+    if (window.top !== window.self || document.getElementById('ng-pan-btn')) return;
+    const b = document.createElement('div'); b.id = 'ng-pan-btn';
+    const pint = () => { const p = liqPanel(); b.style.display = p ? '' : 'none'; if (!p) return; const on = p.v !== 'Oculto';
+      b.textContent = on ? '● PANEL ON' : '○ PANEL OFF';
+      b.title = on ? 'Clic para OCULTAR el panel de Liquidez · Barridos' : 'Clic para MOSTRAR el panel de Liquidez · Barridos';
+      b.style.cssText = 'position:fixed;left:62px;bottom:84px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
+        + 'font:600 11px system-ui,sans-serif;letter-spacing:.3px;border:1px solid ' + (on ? '#e040fb' : '#55606b') + ';'
+        + 'background:rgba(11,21,32,.85);color:' + (on ? '#e040fb' : '#8a96a3') + ';'; };
+    b.onclick = () => { const p = liqPanel(); if (!p) return;
+      if (p.v !== 'Oculto') { gmSet('ng_panel_modo', p.v || 'Mínimo'); p.st.setInputValues([{ id: p.id, value: 'Oculto' }]); }
+      else p.st.setInputValues([{ id: p.id, value: gmGet('ng_panel_modo', 'Mínimo') }]);
+      setTimeout(pint, 400); };
+    pint(); document.body.appendChild(b); setInterval(pint, 3000);
+  }
+  setTimeout(botonPanel, 4000);
   setInterval(() => dibujar(false), 15e3);
 
   // v3.9: PRECIO EN VIVO desde TU TradingView (la lista de seguimiento que ya ves en pantalla) → se comparte con el Plan del Día.
