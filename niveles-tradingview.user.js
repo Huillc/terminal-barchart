@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.6
+// @version      4.7
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -268,7 +268,7 @@
       let eod = gmGet('ng_eod', null);
       if (!eod || eod.dia !== t.dia) {
         eod = { dia: t.dia, s: {} };
-        for (const [s, n] of [['QQQ', 230], ['DIA', 30], ['GLD', 30], ['HYG', 60], ['LQD', 60]]) {
+        for (const [s, n] of [['QQQ', 230], ['DIA', 230], ['GLD', 230], ['HYG', 60], ['LQD', 60]]) {
           try { eod.s[s] = (await serie('/proxies/timeseries/queryeod.ashx', { symbol: s, data: 'daily', maxrecords: n, order: 'asc', dividends: 'false', backadjust: 'false' })).filter((c) => c.length >= 6).map((c) => ({ d: c[1], h: +c[3], l: +c[4], c: +c[5] })); } catch (e) {}
         }
         gmSet('ng_eod', eod);
@@ -527,6 +527,11 @@
           for (const e of E) { i++; if (e.c > prevH || i >= 5) { sal = e.c; break; } prevH = e.h; }
           if (sal) { x.r = +((sal / x.ent - 1) * 100).toFixed(2); x.unid = '%'; cambio = true; }
         }
+        if (x.tipo === 'caida' && x.dia < t.dia) {   // v4.7: objetivo +0,5 ATR / stop −4 ATR / máx 20 días (en el ETF)
+          const E = (dd.eod[x.sym] || []).filter((e) => e.d > x.dia && (e.d < t.dia || cerrado())); let sal = null, i = 0;
+          for (const e of E) { i++; if (e.l <= x.stop) { sal = x.stop; break; } if (e.h >= x.obj) { sal = x.obj; break; } if (i >= 20) { sal = e.c; break; } }
+          if (sal) { x.r = +((sal / x.ent - 1) * 100).toFixed(2); x.unid = '%'; cambio = true; }
+        }
       }
       if (cambio) gmSet('ng_diario', D);
       return D;
@@ -552,6 +557,55 @@
       if (t.min < 900) return { n: 'EJECUCIÓN', d: `escenarios activos · cierre de bolsa ${limaDeNY(960)} Lima` };
       if (t.min < 960) return { n: 'CIERRE', d: `ventana del rebote de pánico (se compra al cierre, ${limaDeNY(960)} Lima)` };
       return { n: 'MERCADO CERRADO', d: 'resultados del día al diario · el plan de mañana se arma desde la madrugada' };
+    }
+    // v4.7: CAÍDA RÁPIDA (EN PRUEBA) — comprar al cierre si el precio cayó más de 2,5 ATR desde el máximo de 5 días y está sobre la media de 200;
+    // objetivo +0,5 ATR · stop −4 ATR · máximo 20 días. ETF 2007–2026: QQQ 92 %, DIA 92 %, GLD 92 % de acierto, positiva en 2007–16 y 2017–26.
+    function caida(dd, sym) {
+      const E = dd.eod[sym], q = dd.Q[sym];
+      if (!E || E.length < 205 || !q || !(q.lastPrice > 0)) return { estado: 'faltan datos' };
+      const tt = ny(), hoyH = !/Sat|Sun/.test(tt.sem) && tt.min >= 570, Ec = E.filter((x) => x.d < hoyNY());   // sesiones anteriores + hoy (en vivo o ya cerrado)
+      let a = null; for (let i = 1; i < Ec.length; i++) { const tr = Math.max(Ec[i].h - Ec[i].l, Math.abs(Ec[i].h - Ec[i - 1].c), Math.abs(Ec[i].l - Ec[i - 1].c)); a = a == null ? tr : (a * 13 + tr) / 14; }
+      const vivo = hoyH, px = q.lastPrice;
+      const C = Ec.map((x) => x.c).concat(vivo ? [px] : []);
+      const sma200 = C.slice(-200).reduce((t, x) => t + x, 0) / 200;
+      const altos = Ec.slice(vivo ? -4 : -5).map((x) => x.h).concat(vivo && q.highPrice > 0 ? [q.highPrice] : []);
+      const hh5 = Math.max(...altos), caidaATR = (hh5 - px) / a;
+      const ok = { caida: caidaATR > 2.5, tend: px > sma200 };
+      return { atr: a, sma200, hh5, caidaATR, ok, señal: ok.caida && ok.tend, cerca: !ok.caida && caidaATR > 2 && ok.tend, obj: px + 0.5 * a, stop: px - 4 * a, px };
+    }
+    function rutinaHTML(data, dd) {
+      const hoy = hoyNY(); let R0 = gmGet('ng_rutina', null); if (!R0 || R0.dia !== hoy) { R0 = { dia: hoy, m: {} }; gmSet('ng_rutina', R0); }
+      const ck = (k, txt, sub) => `<label style="display:flex;gap:6px;align-items:flex-start;margin:3px 0;cursor:pointer"><input type="checkbox" class="rt" data-k="${k}" ${R0.m[k] ? 'checked' : ''} style="width:auto;margin-top:2px"><span><b>${txt}</b><br><span class="m">${sub}</span></span></label>`;
+      const fila = (n, txt, cont) => `<div style="margin:5px 0;padding:5px 7px;background:#0b1118;border-radius:6px"><b style="color:#9fc5ff">${n}.</b> <b>${txt}</b><div style="margin-top:2px">${cont}</div></div>`;
+      const pill = (cls, t) => `<span class="fo ${cls}" style="margin-right:5px">${t}</span>`;
+      let p1 = '', p2 = '', p5 = '', autos = 0, buenas = 0;
+      for (const sym of Object.keys(ACTIVOS)) {
+        const it = data.items[sym], k = it && it.ratio, nm = ACTIVOS[sym].nombre, d = ACTIVOS[sym].dec, c = caida(dd, sym);
+        if (c.estado) { p1 += pill('fn', nm + ': faltan datos'); continue; }
+        p1 += pill(c.ok.tend ? 'fu' : 'fd', `${nm} <b>${c.ok.tend ? 'sobre' : 'bajo'}</b> media 200`);
+        if (c.ok.tend) buenas++;
+        p2 += pill(c.señal ? 'fu' : c.cerca ? 'fa' : 'fn', c.señal ? `${nm} <b>● SEÑAL</b> caída ${c.caidaATR.toFixed(1)} ATR · comprar al cierre ~${k ? f(c.px * k, d) : '—'} · obj ${k ? f(c.obj * k, d) : '—'} · stop ${k ? f(c.stop * k, d) : '—'} · máx 20 días`
+          : c.cerca ? `${nm} <b>◐ cerca</b> caída ${c.caidaATR.toFixed(1)} ATR (necesita &gt; 2,5)` : `${nm} ○ caída ${c.caidaATR.toFixed(1)} ATR`);
+        if (c.señal) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
+        const E = it && !it.error ? escenarios(sym, it, dd) : null;
+        if (E && E.modo) p5 += pill(E.modo === 'AMPLIO' ? 'fd' : 'fu', `${nm} día <b>${E.modo}</b>`);
+      }
+      const Pn = panico(dd), P = proximoDato(), cap = gmGet('ng_capital', null);
+      const p3 = Pn.rsi == null ? pill('fn', 'faltan datos') : pill(Pn.señal ? 'fu' : Pn.cerca ? 'fa' : 'fn', Pn.señal ? '<b>● REBOTE DE PÁNICO ACTIVO</b> (NAS100, comprar al cierre)' : `RSI2 NAS100 ${Pn.rsi.toFixed(1)} (necesita &lt; 10) · crédito ${Pn.ok.cred ? 'sano' : 'débil'}`);
+      if (Pn.señal) autos++;
+      const p4 = P ? pill(P.fin ? 'fn' : P.imp >= 3 ? 'fd' : 'fa', P.fin ? 'ya salieron los datos de hoy' : `${P.h} Lima · ${P.n} ${P.imp >= 3 ? '(FUERTE: no entrar 15 min antes/después)' : ''}`) : pill('fn', 'sin calendario (abre el Terminal)');
+      const ver = autos ? `<b class="up">HOY HAY SEÑAL MEDIDA</b> — opera solo esa, con su stop y su objetivo` : buenas >= 2 ? `<b class="am">SIN SEÑAL MEDIDA</b> — si operas: tamaño reducido, solo con retest + confirmación y a favor de la media 200` : `<b class="dn">DÍA DE OBSERVAR</b> — mercado bajo la media 200 y sin señal: mejor no operar o tamaño mínimo`;
+      let h = `<div class="c" style="flex-basis:100%"><h4><span>✅ RUTINA DE LA MAÑANA · 8 puntos</span><span class="m" style="font-size:11px">1–5 automáticos · 6–8 los marcas tú · se reinicia cada día</span></h4>`;
+      h += `<div class="gen" style="color:#cfe1ff">${ver}</div>`;
+      h += fila(1, 'Tendencia diaria (media de 200)', p1 + '<span class="m"> sobre = solo compras en caídas · bajo = operar menos</span>');
+      h += fila(2, 'Señal de alto acierto: caída rápida', p2 + '<br><span class="pr">EN PRUEBA</span> <span class="m">caída &gt; 2,5 ATR desde el máx. de 5 días + sobre media 200 · ETF 2007–26: ~92 % de acierto en los 3 · obj +0,5 ATR, stop −4 ATR: <b>cada pérdida borra ~8 ganancias</b>, no muevas el stop</span>');
+      h += fila(3, 'Rebote de pánico (NAS100)', p3 + '<span class="m"> · 2007–26: 71 %, +0,31 %/op</span>');
+      h += fila(4, 'Calendario', p4);
+      h += fila(5, 'Tipo de día (gamma)', (p5 || pill('fn', 'calculando…')) + '<span class="m"> amplio = stops más anchos, no comprar "barato" · frenado = rangos</span>');
+      h += fila(6, 'Mapa 4h en TradingView', ck('m6', 'Marqué la liquidez: PDH/PDL, PWH/PWL, $$$ EQH/EQL y el FVG más cercano', 'el mapa dice DÓNDE reaccionar, no la dirección (dirección por estructura = 45–52 %)'));
+      h += fila(7, 'Gatillo en 15–30 min', ck('m7', 'Espero que toque el nivel, haga retest y cierre una vela de confirmación', 'entrar en la ruptura salió negativo; retest + confirmación es mejor'));
+      h += fila(8, 'Riesgo antes de entrar', ck('m8', 'Stop donde se anula la idea · riesgo 0,5 % ' + (cap ? `(= ${f(cap * 0.005, 0)} USD)` : '(pon tu capital abajo)') + ' · objetivo ≥ 1,5R en la próxima liquidez', 'si no hay 1,5R hasta la próxima liquidez, no hay operación'));
+      return h + '</div>';
     }
     function pintar(estado) {
       const abierto = gmGet('ng_abierto', true), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null), F = fase();
@@ -622,9 +676,10 @@
           if (E) h += `<div class="niv">${E.N.map((x) => `<span${Math.abs(x.v - E.px) < p.stop ? ' style="color:#fff"' : ''}>${x.n} <b>${f(x.v, d)}</b></span>`).join('')}</div>`;
           h += '</div>';
         }
+        try { h += rutinaHTML(data, dd); } catch (e) { h += `<div class="c" style="flex-basis:100%"><span class="dn">Rutina: ${e.message}</span></div>`; }
         const D = evaluarDiario(dd), hechos = D.filter((x) => x.r != null);
-        const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' ? ' %' : ' R'}` : 'aún sin resultados'; };
-        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
+        const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' || tipo === 'caida' ? ' %' : ' R'}` : 'aún sin resultados'; };
+        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · caída rápida: ${txt('caida')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
       }
       h += '</div>';
       const bOld = sh.querySelector('.b'), scr = bOld ? bOld.scrollTop : 0;   // v4.2: conservar el desplazamiento al refrescar
@@ -640,6 +695,7 @@
         const env = confirm('¿El token es de tu cuenta REAL?\nAceptar = real · Cancelar = demo') ? 'real' : 'demo';
         gmSet('ng_oanda', { tok, env }); pintar('· conectando OANDA…'); cicloDia(true);
       }; }
+      for (const x of sh.querySelectorAll('input.rt')) x.onchange = () => { const R0 = gmGet('ng_rutina', { dia: hoyNY(), m: {} }); R0.m[x.dataset.k] = x.checked; gmSet('ng_rutina', R0); };
       const ci = sh.getElementById('cap'); if (ci) ci.onchange = () => { const v = +ci.value; gmSet('ng_capital', v > 0 ? v : null); pintar(); };
     }
 
