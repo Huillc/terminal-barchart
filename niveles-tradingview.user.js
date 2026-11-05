@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.8
+// @version      5.9
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -25,11 +25,11 @@
   const ACTIVOS = {
     // idx = respaldo en Barchart cuando el escáner de TradingView no da el CFD (pasa con NAS100)
     DIA: { cfd: 'OANDA:US30USD',   idx: '$DOWI',   nombre: 'US30',   dec: 0 },
-    QQQ: { cfd: 'OANDA:NAS100USD', idx: '$IUXX',   nombre: 'NAS100', dec: 0 },
+    QQQ: { cfd: 'OANDA:NAS100USD', idx: '$IUXX',   nombre: 'NAS100', dec: 0, gexIdx: '$IUXX' }, // v5.9: en el CFD el GEX sale de las opciones del índice NDX (strikes de 100 en 100)
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 37; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 38; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -145,7 +145,7 @@
       return x.trim().split('\n').map((l) => l.split(','));
     }
 
-    async function cadena(sym, hoy) {
+    async function cadena(sym, hoy, maxVenc) {
       let all = [];
       for (let pg = 1; pg <= 12; pg++) {
         const j = await api('/proxies/core-api/v1/options/get', {
@@ -155,6 +155,7 @@
         const d = (j.data || []).map((x) => x.raw || x);
         all = all.concat(d);
         if (d.length < 1000 || dte(d[d.length - 1].expirationDate, hoy) > DIAS_ESTR) break;
+        if (maxVenc && new Set(all.map((x) => x.expirationDate)).size > maxVenc) break;
       }
       return all;
     }
@@ -261,6 +262,9 @@
             }
           } catch (e) {}
           const a = ACTIVOS[sym], cReal = cfd[a.cfd], cIdx = spot[a.idx];
+          // v5.9: GEX del índice para el CFD (solo si Barchart lo entrega)
+          let gexI = null;
+          if (a.gexIdx && spot[a.gexIdx]) { try { const LI = (await cadena(a.gexIdx, hoy, 4)).filter((x) => dte(x.expirationDate, hoy) >= 0), vI = [...new Set(LI.map((x) => x.expirationDate))].sort().slice(0, 4); if (vI.length) gexI = gexPerfil(LI, spot[a.gexIdx], hoy, vI[0], LI.filter((x) => vI.includes(x.expirationDate))); } catch (e) {} }
           const c = cReal || cIdx || null;
           items[sym] = {
             spot: S, cfdSym: a.cfd, nombre: a.nombre, dec: a.dec,
@@ -268,6 +272,7 @@
             ratio: c ? c / S : null,
             opc,
             gex: vCerca ? gexPerfil(ch, S, hoy, vCerca, ch.filter((x) => semV.includes(x.expirationDate))) : null,
+            gexI,
             semana: mapa(ch.filter((x) => semV.includes(x.expirationDate)), S, hoy),
             estructural: mapa(ch.filter((x) => estV.includes(x.expirationDate)), S, hoy),
             maxPain: {
@@ -947,27 +952,30 @@
 
   // v5.6: los dibujos van en fila; un clic durante un dibujo ya no deja líneas sueltas
   let dibujando = false, dibPendiente = null;
-  const GX_COL = { barP: '#2fbf72', barN: '#ff5c6d', linC: '#2fbf73', linP: '#ff5c6e', hvl: '#29c5f7', marca: '#ffb021', bandaV: '#2fbf74', bandaR: '#ff5c6f' };
+  const GX_COL = { barP: '#2fbf72', barN: '#ff5c6d', linC: '#2fbf73', linP: '#ff5c6e', hvl: '#29c5f7', marca: '#ffb021', marcaAb: '#9d8cf0', bandaV: '#2fbf74', bandaR: '#ff5c6f' };
   const GX_MIOS = Object.values(GX_COL);
   let gxVista = null, gxClave = '', gxCv = null, gxOffsetPrevio = null;
-  // v5.8: el perfil se pinta en una capa propia sobre el gráfico: no crea dibujos en TradingView, no se guarda en la plantilla y sigue zoom y desplazamiento
+  // v5.9: el perfil se pinta en una capa propia sobre el gráfico: no crea dibujos en TradingView, no se guarda en la plantilla y sigue zoom y desplazamiento
   function gxPintaCapa(cv, ch, v, r) {
     const ts = ch.getTimeScale(), ps = ch.getPanes()[0].getMainSourcePriceScale(), W = r.width, H = r.height, dpr = window.devicePixelRatio || 1;
     if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
     const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, W, H);
     if (!v) return;
-    const Y = (p) => ps.priceToCoordinate(p), dentro = (y) => y != null && y > -5 && y < H + 5;
+    const Y = (p) => ps.priceToCoordinate(p), dentro = (y) => y != null && y > -5 && y < H + 5, FUENTE = 'ui-monospace,Consolas,monospace';
     c.textBaseline = 'middle';
-    for (const l of v.lineas) { const y = Y(l.p); if (!dentro(y)) continue; c.strokeStyle = l.col; c.globalAlpha = 0.75; c.lineWidth = l.w; c.setLineDash(l.est ? [5, 4] : []); c.beginPath(); c.moveTo(0, Math.round(y) + 0.5); c.lineTo(W, Math.round(y) + 0.5); c.stroke(); }
+    for (const l of v.lineas) { const y = Y(l.p); if (!dentro(y)) continue; c.strokeStyle = l.col; c.globalAlpha = l.a; c.lineWidth = l.w; c.setLineDash(l.est ? [3, 4] : []); c.beginPath(); c.moveTo(0, Math.round(y) + 0.5); c.lineTo(W, Math.round(y) + 0.5); c.stroke(); }
     c.globalAlpha = 1; c.setLineDash([]);
-    const x0 = W - ts.rightOffset() * ts.barSpacing(), xa = Math.min(Math.max(x0 + 8, 0), W - 270), xStr = xa + 18, b0 = xa + 50, L = Math.max(70, Math.min(W * 0.17, W - b0 - 125));
-    if (v.hvl != null && v.S) { const y1 = Y(v.S), y2 = Y(v.hvl); if (y1 != null && y2 != null) { c.fillStyle = v.S > v.hvl ? GX_COL.bandaV : GX_COL.bandaR; c.globalAlpha = 0.3; c.fillRect(xa, Math.min(y1, y2), 12, Math.abs(y2 - y1)); c.globalAlpha = 1; } }
-    const orden = v.barras.slice().sort((a, b) => (v.etiq[b.k] ? 1 : 0) - (v.etiq[a.k] ? 1 : 0) || b.f - a.f), usadosE = [], usadosS = [];
-    for (const x of orden) { const y = Y(x.p); if (!dentro(y)) continue; const col = x.pos ? GX_COL.barP : GX_COL.barN, x1 = b0 + Math.max(0.03, x.f) * L;
-      c.fillStyle = col; const g = x.f > 0.5 ? 5 : x.f > 0.2 ? 4 : 3; c.globalAlpha = 0.9; c.fillRect(b0, Math.round(y - g / 2), x1 - b0, g); c.globalAlpha = 1;
-      if (!usadosS.some((u) => Math.abs(u - y) < 10)) { usadosS.push(y); c.font = '9px system-ui,sans-serif'; c.fillText(String(x.p), xStr, y - 6); }
-      const e = v.etiq[x.k]; if (e && !usadosE.some((u) => Math.abs(u - y) < 11)) { usadosE.push(y); let xt = x1 + 6; c.font = '600 10px system-ui,sans-serif'; if (e.t) { c.fillStyle = e.col; c.fillText(e.t, xt, y - 6); xt += c.measureText(e.t).width + 7; } if (e.m.length) { c.font = '9px system-ui,sans-serif'; c.fillStyle = GX_COL.marca; c.fillText(e.m.join('  '), xt, y - 6); } } }
-    if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.font = '12px system-ui,sans-serif'; c.fillText('●', b0, y - 8); c.fillStyle = GX_COL.hvl; c.font = '600 10px system-ui,sans-serif'; c.fillText(v.hvlTxt, b0 + 12, y - 8); } }
+    const x0 = W - ts.rightOffset() * ts.barSpacing(), xa = Math.min(Math.max(x0 + 10, 0), W - 250), xBanda = xa + 34, b0 = xa + 56, L = Math.min(115, W * 0.11);
+    if (v.hvl != null && v.S) { const y1 = Y(v.S), y2 = Y(v.hvl); if (y1 != null && y2 != null) { c.fillStyle = v.S > v.hvl ? GX_COL.bandaV : GX_COL.bandaR; c.globalAlpha = 0.28; c.fillRect(xBanda, Math.min(y1, y2), 13, Math.abs(y2 - y1)); c.globalAlpha = 1; } }
+    const orden = v.barras.slice().sort((a, b) => b.f - a.f), usadosE = [], usadosS = [];
+    for (const x of orden) { const y = Y(x.p); if (!dentro(y)) continue; const col = x.pos ? GX_COL.barP : GX_COL.barN, largo = Math.max(10, x.f * L), fuerza = 0.4 + 0.6 * x.f;
+      // Barra rayada: más larga y más viva cuanto más GEX tiene el strike
+      c.fillStyle = col; c.globalAlpha = fuerza; for (let px = 0; px < largo; px += 3) c.fillRect(b0 + px, Math.round(y) - 3, 2, 6); c.globalAlpha = 1;
+      if (!usadosS.some((u) => Math.abs(u - y) < 9)) { usadosS.push(y); c.font = '9px ' + FUENTE; c.fillStyle = col; c.globalAlpha = 0.45 + 0.55 * x.f; c.fillText(String(x.p), xa, y - 5); c.globalAlpha = 1; }
+      const e = v.etiq[x.k]; if (e && !usadosE.some((u) => Math.abs(u - y) < 9)) { usadosE.push(y); let xt = b0 + largo + 14; c.font = '10px ' + FUENTE; if (e.t) { c.fillStyle = e.col; c.globalAlpha = 0.45 + 0.55 * x.f; c.fillText(e.t, xt, y); c.globalAlpha = 1; xt += c.measureText(e.t).width + 12; }
+        c.font = '9px ' + FUENTE; for (const m of e.m) { c.fillStyle = /^Ab\d/.test(m) ? GX_COL.marcaAb : GX_COL.marca; c.fillText(m, xt, y); xt += c.measureText(m).width + 8; } } }
+    if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { c.font = '9px ' + FUENTE; c.fillStyle = '#b6bec7'; c.fillText(String(Math.round(v.hvl)), xa, y - 5); c.beginPath(); c.arc(b0 + 4, y, 4, 0, 7); c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.fill(); c.font = '10px ' + FUENTE; c.fillStyle = GX_COL.hvl; c.fillText(v.hvlTxt, b0 + 16, y); } }
+    if (v.viejo) { c.font = '600 12px system-ui,sans-serif'; c.fillStyle = '#ffd166'; c.fillText('Datos viejos: pulsa F5 en la pestaña de Barchart', 12, H - 18); }
   }
   // Deja sitio a la derecha del precio al encender; al apagar devuelve el margen que había
   function gxEspacio(ch, on) { try { const ts = ch.getTimeScale(); if (on) { if (gxOffsetPrevio === null && ts.rightOffset() * ts.barSpacing() < ts.width() * 0.3) { gxOffsetPrevio = ts.rightOffset(); ts.setRightOffset(Math.round(ts.width() * 0.3 / ts.barSpacing())); } } else if (gxOffsetPrevio !== null) { ts.setRightOffset(gxOffsetPrevio); gxOffsetPrevio = null; } } catch (e) {} }
@@ -1002,23 +1010,22 @@
     // v1.1: si el gráfico ES el ETF (QQQ, DIA, GLD de cualquier bolsa) los niveles van tal cual;
     // si es el CFD/índice, se convierten con la relación en vivo CFD/ETF.
     const esEtf = String(sym).split(':').pop().toUpperCase() === etf;
-    if (on && !esEtf && !it.ratio) return;
-    const k = esEtf ? 1 : (it ? it.ratio : 1), dec = esEtf ? 2 : (it ? it.dec : 2);
+    if (on && !esEtf && !it.ratio && !it.gexI) return;
+    const usaI = !esEtf && it && it.gexI, k = esEtf || usaI ? 1 : (it ? it.ratio : 1), dec = esEtf ? 2 : (it ? it.dec : 2);
     // v5.7: perfil al estilo de escalera: líneas finas sin texto, strikes, barras, etiquetas, marcas y banda precio–HVL
     const px = (v) => +(v * k).toFixed(dec), lineas = [], barras = [], etiq = {};
-    const G = on && it ? it.gex : null, gx = G ? gexDe(it) : null;
+    const G = on && it ? (usaI ? it.gexI : it.gex) : null, gx = G ? G[gexModo()] : null;
     let hvlTxt = '';
     if (G && gx) {
-      gx.C.forEach((x, i) => { etiq[x.k] = { t: `C${i + 1}`, col: GX_COL.linC, m: [] }; if (i < 3) lineas.push({ p: px(x.k), col: GX_COL.linC, w: i === 0 ? 2 : 1, est: i === 0 ? 0 : 2 }); });
-      gx.P.forEach((x, i) => { etiq[x.k] = { t: `P${i + 1}`, col: GX_COL.linP, m: [] }; if (i < 3) lineas.push({ p: px(x.k), col: GX_COL.linP, w: i === 0 ? 2 : 1, est: i === 0 ? 0 : 2 }); });
-      if (gx.hvl != null) { lineas.push({ p: px(gx.hvl), col: GX_COL.hvl, w: 2, est: 0 }); hvlTxt = gexModo() === 'acum' ? 'HVL Σ4V' : `HVL ${G.dte}DTE (${G.venc.slice(5).replace('-', '/')})`; }
+      gx.C.forEach((x, i) => { etiq[x.k] = { t: `C${i + 1}`, col: GX_COL.linC, m: [] }; lineas.push({ p: px(x.k), col: GX_COL.linC, w: i === 0 ? 1.5 : 1, est: i > 0, a: i === 0 ? 0.85 : i < 3 ? 0.4 : 0.2 }); });
+      gx.P.forEach((x, i) => { etiq[x.k] = { t: `P${i + 1}`, col: GX_COL.linP, m: [] }; lineas.push({ p: px(x.k), col: GX_COL.linP, w: i === 0 ? 1.5 : 1, est: i > 0, a: i === 0 ? 0.85 : i < 3 ? 0.4 : 0.2 }); });
+      if (gx.hvl != null) { lineas.push({ p: px(gx.hvl), col: '#8a96a3', w: 1, est: false, a: 0.7 }); hvlTxt = gexModo() === 'acum' ? 'HVL Σ4V' : `HVL ${G.dte}DTE (${G.venc.slice(5).replace('-', '/')})`; }
       const marca = (kk, t) => { if (kk == null) return; if (!etiq[kk]) etiq[kk] = { t: '', col: GX_COL.marca, m: [] }; etiq[kk].m.push(t); };
       if (gx.M) { (gx.M.Ab || []).forEach((kk, i) => marca(kk, `Ab${i + 1}`)); for (const t of ['nCOI', 'COI', 'AbOI', 'nPOI', 'POI']) marca(gx.M[t], t); }
-      const mx = Math.max(1, ...gx.B.map((x) => Math.abs(x.g)));
-      for (const x of gx.B) barras.push({ k: x.k, p: px(x.k), f: Math.abs(x.g) / mx, pos: x.g > 0 });
-      // Un strike con marca pero fuera de las 30 barras mayores también se muestra, con barra mínima
-      for (const kk of Object.keys(etiq).map(Number)) if (!barras.some((x) => x.k === kk)) barras.push({ k: kk, p: px(kk), f: 0, pos: etiq[kk].t[0] !== 'P' }); }
-    gxVista = on && G && gx ? { sym, lineas, barras, etiq, S: G.S ? px(G.S) : null, hvl: gx.hvl != null ? px(gx.hvl) : null, hvlTxt } : null; gxEspacio(ch, !!gxVista); gxClave = '';
+      // Solo strikes con etiqueta o marca, como en el diseño de referencia
+      const mx = Math.max(1, ...gx.B.map((x) => Math.abs(x.g))), gde = {}; for (const x of [...gx.B, ...gx.C, ...gx.P]) gde[x.k] = x.g;
+      for (const kk of Object.keys(etiq).map(Number)) barras.push({ k: kk, p: px(kk), f: Math.abs(gde[kk] || 0) / mx, pos: gde[kk] != null ? gde[kk] > 0 : etiq[kk].t[0] !== 'P' }); }
+    gxVista = on && G && gx ? { sym, lineas, barras, etiq, S: G.S ? px(G.S) : null, hvl: gx.hvl != null ? px(gx.hvl) : null, hvlTxt, viejo: !gx.M || (!esEtf && it.gexI === undefined && ACTIVOS[etf].gexIdx) } : null; gxEspacio(ch, !!gxVista); gxClave = '';
     const firma = (on ? 'on|' : 'off|') + sym + '|' + (G ? G.S : '') + '|' + hvlTxt + JSON.stringify(lineas) + JSON.stringify(barras.map((x) => [x.p, +x.f.toFixed(2)])) + JSON.stringify(etiq);
     if (!forzar && firma === ultimaFirma) return;
 
