@@ -1,33 +1,31 @@
 //@version=6
-// Liquidez 4H: solo la liquidez que FALTA por tomar y la más cercana al precio, arriba y abajo. NO es señal de entrada.
-// Tipos: máximos/mínimos iguales ($$$), líneas de tendencia con 3 toques ($$$) y giros con reacción clara ($).
-// En cuanto una mecha toma el nivel, desaparece. Los giros se confirman con velas cerradas: aparecen con retraso y no se repintan.
-indicator("Liquidez 4H", overlay = true, max_lines_count = 40, max_labels_count = 40)
+// Liquidez 4H: solo la liquidez que FALTA por tomar. NO es señal de entrada.
+// Une con una línea los giros pendientes vecinos ($$$), con su precio real, aunque no estén al mismo nivel.
+// Un giro solo, con reacción clara, se marca con $. Cuando una mecha lo toma, desaparece.
+// Los giros se confirman con velas cerradas: aparecen con retraso y no se repintan.
+indicator("Liquidez 4H", overlay = true, max_lines_count = 80, max_labels_count = 40)
 
 grpA = "Qué mostrar"
-nArriba = input.int(3, "Niveles pendientes arriba", minval = 0, maxval = 10, group = grpA)
-nAbajo = input.int(3, "Niveles pendientes abajo", minval = 0, maxval = 10, group = grpA)
-verSueltos = input.bool(true, "Incluir giros con reacción ($)", group = grpA)
-verLineas = input.bool(true, "Incluir líneas de tendencia", group = grpA)
+nArriba = input.int(3, "Grupos pendientes arriba", minval = 0, maxval = 10, group = grpA)
+nAbajo = input.int(3, "Grupos pendientes abajo", minval = 0, maxval = 10, group = grpA)
+verSueltos = input.bool(true, "Incluir giros solos ($)", group = grpA)
 grpB = "Criterio"
 tf = input.timeframe("240", "Temporalidad", group = grpB)
 velas = input.int(5, "Velas a cada lado del giro", minval = 2, maxval = 20, group = grpB)
-tol = input.float(0.4, "Tolerancia de iguales y de línea (en ATR)", minval = 0.05, maxval = 1.0, step = 0.05, group = grpB)
-minReac = input.float(1.5, "Reacción mínima de un giro suelto (en ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = grpB)
+maxVelas = input.int(40, "Unir giros separados hasta (velas)", minval = 5, maxval = 200, group = grpB)
+maxDif = input.float(3.0, "Unir giros con diferencia hasta (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, group = grpB)
+minReac = input.float(1.5, "Reacción mínima de un giro solo (ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = grpB)
 grpC = "Colores"
 colAlta = input.color(#e6e9ee, "Liquidez arriba", group = grpC)
 colBaja = input.color(#e6e9ee, "Liquidez abajo", group = grpC)
+grosor = input.int(2, "Grosor de línea", minval = 1, maxval = 4, group = grpC)
 
-const int MAX_GUARDADOS = 40
+const int MAX_GUARDADOS = 60
 
 type Liq
-    float p1
-    int t1
-    float p2
-    int t2
-    float reac = 0.0
-    int toques = 1
-    bool inclinada = false
+    float p
+    int t
+    float reac
 
 datos(int n) =>
     float ph = ta.pivothigh(high, n, n)
@@ -41,109 +39,82 @@ datos(int n) =>
 
 var array<Liq> arriba = array.new<Liq>()
 var array<Liq> abajo = array.new<Liq>()
-var array<float> hP = array.new<float>()
-var array<int> hT = array.new<int>()
-var array<float> lP = array.new<float>()
-var array<int> lT = array.new<int>()
 var int ultH = 0
 var int ultL = 0
+var float atrUlt = na
 var array<line> lineas = array.new<line>()
 var array<label> textos = array.new<label>()
 
-precioEn(Liq k, int t) =>
-    k.inclinada ? k.p1 + (k.p2 - k.p1) * (t - k.t1) / (k.t2 - k.t1) : k.p1
+agregar(array<Liq> z, float p, int t, float r) =>
+    z.push(Liq.new(p, t, r))
+    if z.size() > MAX_GUARDADOS
+        z.shift()
 
-// Un giro nuevo: si cae cerca de un nivel pendiente, lo refuerza; si no, crea uno.
-nuevoGiro(array<Liq> z, float p, int t, float a, float r, int lado) =>
-    bool unido = false
-    if z.size() > 0
-        for k in z
-            if not k.inclinada and math.abs(k.p1 - p) <= tol * a
-                k.toques += 1
-                k.reac := math.max(k.reac, r)
-                k.p1 := lado > 0 ? math.max(k.p1, p) : math.min(k.p1, p)
-                k.p2 := k.p1
-                k.t2 := t
-                unido := true
-                break
-    if not unido
-        z.push(Liq.new(p, t, p, t, r))
-        if z.size() > MAX_GUARDADOS
-            z.shift()
-
-// Línea de tendencia: 3 giros seguidos alineados
-probarLinea(array<Liq> z, array<float> P, array<int> T, float a, int lado) =>
-    int m = P.size()
-    if m >= 3
-        float a1 = P.get(m - 3)
-        float a2 = P.get(m - 2)
-        float a3 = P.get(m - 1)
-        int t1 = T.get(m - 3)
-        int t2 = T.get(m - 2)
-        int t3 = T.get(m - 1)
-        bool orden = lado > 0 ? a1 > a2 and a2 > a3 : a1 < a2 and a2 < a3
-        if orden and t3 > t1
-            float medio = a1 + (a3 - a1) * (t2 - t1) / (t3 - t1)
-            if math.abs(a2 - medio) <= tol * a
-                z.push(Liq.new(a1, t1, a3, t3, 0.0, 3, true))
-                if z.size() > MAX_GUARDADOS
-                    z.shift()
-
-guardarGiro(array<float> P, array<int> T, float p, int t) =>
-    P.push(p)
-    T.push(t)
-    if P.size() > 6
-        P.shift()
-        T.shift()
-
-// Liquidez tomada: una mecha cruza el nivel y deja de contar
+// Liquidez tomada: una mecha cruza el giro y deja de contar
 revisar(array<Liq> z, int lado) =>
     int cuenta = 0
     if z.size() > 0
         for i = z.size() - 1 to 0
             Liq k = z.get(i)
-            float p = precioEn(k, time)
-            if time > k.t2 and (lado > 0 ? high > p : low < p)
+            if time > k.t and (lado > 0 ? high > k.p : low < k.p)
                 z.remove(i)
                 cuenta += 1
     cuenta
 
 if not na(atrTf)
+    atrUlt := atrTf
     if not na(ph) and tPiv != ultH
         ultH := tPiv
-        nuevoGiro(arriba, ph, tPiv, atrTf, reacH, 1)
-        guardarGiro(hP, hT, ph, tPiv)
-        probarLinea(arriba, hP, hT, atrTf, 1)
+        agregar(arriba, ph, tPiv, reacH)
     if not na(pl) and tPiv != ultL
         ultL := tPiv
-        nuevoGiro(abajo, pl, tPiv, atrTf, reacL, -1)
-        guardarGiro(lP, lT, pl, tPiv)
-        probarLinea(abajo, lP, lT, atrTf, -1)
+        agregar(abajo, pl, tPiv, reacL)
 
 int tomadaArriba = revisar(arriba, 1)
 int tomadaAbajo = revisar(abajo, -1)
 
-// Dibuja solo los N niveles válidos más cercanos al precio
+// Agrupa giros vecinos en el tiempo y en precio, y dibuja los N grupos más cercanos al precio
 dibujar(array<Liq> z, int n, int lado, color c) =>
     if n > 0 and z.size() > 0
+        array<int> ini = array.new<int>()
+        array<int> fin = array.new<int>()
         array<float> dist = array.new<float>()
-        array<int> idx = array.new<int>()
-        for [i, k] in z
-            bool fuerte = k.toques >= 2 or k.inclinada
-            bool vale = k.inclinada ? verLineas : fuerte or (verSueltos and k.reac >= minReac)
-            if vale
-                dist.push(math.abs(precioEn(k, time) - close))
-                idx.push(i)
+        int msVela = timeframe.in_seconds(tf) * 1000
+        int a = 0
+        for i = 0 to z.size() - 1
+            bool corta = i == z.size() - 1
+            if not corta
+                Liq x = z.get(i)
+                Liq y = z.get(i + 1)
+                corta := y.t - x.t > maxVelas * msVela or math.abs(y.p - x.p) > maxDif * atrUlt
+            if corta
+                bool solo = a == i
+                if not solo or (verSueltos and z.get(i).reac >= minReac)
+                    float d = 1e20
+                    for j = a to i
+                        d := math.min(d, math.abs(z.get(j).p - close))
+                    ini.push(a)
+                    fin.push(i)
+                    dist.push(d)
+                a := i + 1
         if dist.size() > 0
             array<int> orden = dist.sort_indices(order.ascending)
-            for j = 0 to math.min(n, orden.size()) - 1
-                Liq k = z.get(idx.get(orden.get(j)))
-                bool fuerte = k.toques >= 2 or k.inclinada
-                // Línea de punto a punto: del primer toque al último, con el texto encima (arriba) o debajo (abajo)
-                int tFin = fuerte ? k.t2 : math.min(time, k.t1 + 12 * timeframe.in_seconds(tf) * 1000)
-                lineas.push(line.new(k.t1, k.p1, tFin, k.p2, xloc = xloc.bar_time, color = color.new(c, fuerte ? 0 : 35), width = 1, style = line.style_solid))
-                int tTxt = (k.t1 + tFin) / 2
-                textos.push(label.new(tTxt, (k.p1 + k.p2) / 2, fuerte ? "$$$" : "$", xloc = xloc.bar_time, style = lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small))
+            for g = 0 to math.min(n, orden.size()) - 1
+                int o = orden.get(g)
+                int i0 = ini.get(o)
+                int i1 = fin.get(o)
+                if i1 > i0
+                    for j = i0 to i1 - 1
+                        Liq x = z.get(j)
+                        Liq y = z.get(j + 1)
+                        lineas.push(line.new(x.t, x.p, y.t, y.p, xloc = xloc.bar_time, color = c, width = grosor, style = line.style_solid))
+                    Liq m0 = z.get(i0)
+                    Liq m1 = z.get(i1)
+                    textos.push(label.new((m0.t + m1.t) / 2, (m0.p + m1.p) / 2, "$$$", xloc = xloc.bar_time, style = lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small))
+                else
+                    Liq x = z.get(i0)
+                    lineas.push(line.new(x.t, x.p, math.min(time, x.t + 8 * msVela), x.p, xloc = xloc.bar_time, color = color.new(c, 35), width = 1, style = line.style_solid))
+                    textos.push(label.new(x.t, x.p, "$", xloc = xloc.bar_time, style = lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small))
 
 if barstate.islast
     for l in lineas
