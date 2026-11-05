@@ -12,7 +12,7 @@ verSueltos = input.bool(true, "Incluir giros solos ($)", group = grpA)
 grpB = "Criterio"
 tf = input.timeframe("240", "Temporalidad", group = grpB)
 velas = input.int(5, "Velas a cada lado del giro", minval = 2, maxval = 20, group = grpB)
-maxVelas = input.int(40, "Unir giros separados hasta (velas)", minval = 5, maxval = 200, group = grpB)
+maxVelas = input.int(80, "Unir giros separados hasta (velas)", minval = 5, maxval = 200, group = grpB)
 maxDif = input.float(3.0, "Unir giros con diferencia hasta (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, group = grpB)
 minReac = input.float(1.5, "Reacción mínima de un giro solo (ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = grpB)
 grpC = "Colores"
