@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.5
+// @version      5.6
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -941,32 +941,40 @@
   const guardarIds = (o) => { try { localStorage.setItem('ng_ids', JSON.stringify(o)); } catch (e) {} };
   let ultimaFirma = '';
 
+  // v5.6: los dibujos van en fila; un clic durante un dibujo ya no deja líneas sueltas
+  let dibujando = false, dibPendiente = null;
   async function dibujar(forzar) {
+    if (dibujando) { dibPendiente = !!(dibPendiente || forzar); return; }
+    dibujando = true;
+    try { await dibujarYa(forzar); } finally { dibujando = false; }
+    if (dibPendiente !== null) { const f = dibPendiente; dibPendiente = null; await dibujar(f); }
+  }
+  async function dibujarYa(forzar) {
     const api = W.TradingViewApi;
     if (!api || !api.activeChart) return;
     let ch; try { ch = api.activeChart(); } catch (e) { return; }
     const sym = ch.symbol();
     const etf = ETF_DE(sym);
     const data = gmGet('ng_data', null);
-    if (!etf || !data || !data.items[etf] || data.items[etf].error) return;
-    const it = data.items[etf];
+    // v5.6: apagado borra siempre, aunque falten datos o el símbolo no tenga ETF
+    const on = gmGet('ng_lineas', true);
+    const it = etf && data && data.items[etf] && !data.items[etf].error ? data.items[etf] : null;
+    if (on && !it) return;
     // v1.1: si el gráfico ES el ETF (QQQ, DIA, GLD de cualquier bolsa) los niveles van tal cual;
     // si es el CFD/índice, se convierten con la relación en vivo CFD/ETF.
     const esEtf = String(sym).split(':').pop().toUpperCase() === etf;
-    if (!esEtf && !it.ratio) return;
-    const k = esEtf ? 1 : it.ratio, dec = esEtf ? 2 : it.dec;
+    if (on && !esEtf && !it.ratio) return;
+    const k = esEtf ? 1 : (it ? it.ratio : 1), dec = esEtf ? 2 : (it ? it.dec : 2);
     const lineas = [];
     const add = (strike, tipo, rango, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, rango, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
     // v5.4: C1–C3, P1–P3, HVL y perfil de barras del modo elegido (botón GEX)
-    const G = it.gex, gx = gexDe(it), barras = [];
+    const G = on && it ? it.gex : null, gx = G ? gexDe(it) : null, barras = [];
     if (G && gx) { const tag = gexModo() === 'acum' ? 'Σ4V' : `${G.dte}DTE ${G.venc.slice(5).replace('-', '/')}`;
       gx.C.forEach((x, i) => add(x.k, 'gexC', i + 1, `C${i + 1} ${tag}`));
       gx.P.forEach((x, i) => add(x.k, 'gexP', i + 1, `P${i + 1} ${tag}`));
       if (gx.hvl != null) add(gx.hvl, 'hvl', 1, `HVL ${tag}`);
       const mx = Math.max(1, ...gx.B.map((x) => Math.abs(x.g)));
       for (const x of gx.B) barras.push({ p: +(x.k * k).toFixed(dec), f: Math.abs(x.g) / mx, pos: x.g > 0, k: x.k }); }
-    // v4.3: botón NIVELES ON/OFF → apagado = se borran FLIP/MURO/IMÁN/MAXPAIN y no se vuelven a dibujar (el precio en vivo sigue)
-    const on = gmGet('ng_lineas', true); if (!on) { lineas.length = 0; barras.length = 0; }
     let res = '60'; try { res = String(ch.resolution()); } catch (e) {}
     const firma = (on ? 'on|' : 'off|') + sym + '|' + res + '|' + JSON.stringify(lineas.map((l) => l.texto)) + JSON.stringify(barras.map((x) => [x.p, +x.f.toFixed(2)]));
     if (!forzar && firma === ultimaFirma) return;
@@ -1005,30 +1013,22 @@
   }
 
   try { GM_addValueChangeListener('ng_data', () => dibujar(false)); } catch (e) {}
-  // v4.3: botón para mostrar/ocultar los niveles gamma (FLIP, MURO, IMÁN, MAXPAIN)
-  function botonNiveles() {
-    if (window.top !== window.self || document.getElementById('ng-niv-btn')) return;
-    const b = document.createElement('div'); b.id = 'ng-niv-btn';
-    const pint = () => { const on = gmGet('ng_lineas', true);
-      b.textContent = on ? '● NIVELES ON' : '○ NIVELES OFF';
-      b.title = on ? 'Clic para OCULTAR FLIP · MURO · IMÁN · MAXPAIN' : 'Clic para MOSTRAR FLIP · MURO · IMÁN · MAXPAIN';
-      b.style.cssText = 'position:fixed;left:420px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;'
-        + 'font:600 11px system-ui,sans-serif;letter-spacing:.3px;border:1px solid ' + (on ? '#ffd166' : '#55606b') + ';'
-        + 'background:rgba(11,21,32,.85);color:' + (on ? '#ffd166' : '#8a96a3') + ';'; };
-    b.onclick = () => { gmSet('ng_lineas', !gmGet('ng_lineas', true)); pint(); dibujar(true); };
-    pint(); document.body.appendChild(b);
-    try { GM_addValueChangeListener('ng_lineas', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
-  }
-  setTimeout(botonNiveles, 3000);
-  // v5.4: botón GEX → primer vencimiento o acumulado de los próximos 4
+  // v5.6: un solo botón GEX con tres estados: 1.er vencimiento → acumulado → apagado
   function botonGex() {
     if (window.top !== window.self || document.getElementById('ng-gex-btn')) return;
     const b = document.createElement('div'); b.id = 'ng-gex-btn';
-    const pint = () => { const ac = gexModo() === 'acum'; b.textContent = ac ? 'GEX: acumulado' : 'GEX: 1.er venc.'; b.title = 'Clic para cambiar entre el primer vencimiento y el acumulado de 4';
-      b.style.cssText = 'position:fixed;left:660px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;font:600 11px system-ui,sans-serif;border:1px solid #29c5f6;background:rgba(11,21,32,.85);color:#29c5f6;'; };
-    b.onclick = () => { gmSet('ng_gexmodo', gexModo() === 'acum' ? 'primero' : 'acum'); pint(); dibujar(true); };
+    const pint = () => { const on = gmGet('ng_lineas', true), ac = gexModo() === 'acum';
+      b.textContent = !on ? '○ GEX: apagado' : ac ? '● GEX: acumulado' : '● GEX: 1.er venc.';
+      b.title = 'Clic para cambiar: 1.er vencimiento → acumulado → apagado';
+      const col = on ? '#29c5f6' : '#8a96a3';
+      b.style.cssText = 'position:fixed;left:400px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;font:600 11px system-ui,sans-serif;border:1px solid ' + (on ? '#29c5f6' : '#55606b') + ';background:rgba(11,21,32,.85);color:' + col + ';'; };
+    b.onclick = () => {
+      if (!gmGet('ng_lineas', true)) { gmSet('ng_gexmodo', 'primero'); gmSet('ng_lineas', true); }
+      else if (gexModo() === 'primero') gmSet('ng_gexmodo', 'acum');
+      else gmSet('ng_lineas', false);
+      pint(); dibujar(true); };
     pint(); document.body.appendChild(b);
-    try { GM_addValueChangeListener('ng_gexmodo', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
+    for (const clave of ['ng_gexmodo', 'ng_lineas']) { try { GM_addValueChangeListener(clave, (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {} }
   }
   setTimeout(botonGex, 3000);
   // v4.4: botón PANEL ON/OFF → oculta o muestra el panel del indicador "Liquidez · Barridos" (cambia su opción "Panel resumen: tamaño")
