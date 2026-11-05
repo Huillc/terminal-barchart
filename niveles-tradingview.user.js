@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.6
+// @version      5.8
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -29,7 +29,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 36; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 37; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -98,11 +98,15 @@
   // v5.4: perfil GEX neto propio. Por strike: gamma × interés abierto × 100 × S² × 1 %, calls en positivo y puts en negativo.
   // C1–C3 = mayor neto positivo · P1–P3 = mayor neto negativo · HVL = donde la gamma total cambia de signo. Dos modos: primer vencimiento o acumulado.
   function gexPerfil(filas, S, hoy, venc, semana) {
-    const calc = (L) => { const n = {};
-      for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0) || Math.abs(x.strikePrice / S - 1) > 0.1) continue; n[x.strikePrice] = (n[x.strikePrice] || 0) + x.gamma * x.openInterest * 100 * S * S * 0.01 * (x.optionType === 'Call' ? 1 : -1); }
+    const calc = (L) => { const n = {}, co = {}, po = {}, ag = {};
+      for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0) || Math.abs(x.strikePrice / S - 1) > 0.1) continue; const g = x.gamma * x.openInterest * 100 * S * S * 0.01, c = x.optionType === 'Call', k = x.strikePrice;
+        n[k] = (n[k] || 0) + (c ? g : -g); ag[k] = (ag[k] || 0) + g; const d = c ? co : po; d[k] = (d[k] || 0) + x.openInterest; }
       const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy);
-      return { hvl: m ? m.flip : null, C: A.filter((x) => x.g > 0).sort((p, q) => q.g - p.g).slice(0, 3), P: A.filter((x) => x.g < 0).sort((p, q) => p.g - q.g).slice(0, 3), B: A.slice().sort((p, q) => Math.abs(q.g) - Math.abs(p.g)).slice(0, 20) }; };
-    return { venc, dte: dte(venc, hoy), primero: calc(filas.filter((x) => x.expirationDate === venc)), acum: calc(semana) };
+      // v5.7: marcas por strike (definición propia; se calculan con OI y gamma de Barchart)
+      const ks = Object.keys(n).map(Number), top = (f) => { let b = null, bv = -Infinity; for (const k of ks) { const v = f(k); if (v > bv) { bv = v; b = k; } } return b; }, oc = (k) => co[k] || 0, op = (k) => po[k] || 0;
+      const M = ks.length ? { COI: top(oc), POI: top(op), nCOI: top((k) => oc(k) - op(k)), nPOI: top((k) => op(k) - oc(k)), AbOI: top((k) => oc(k) + op(k)), Ab: ks.slice().sort((p, q) => ag[q] - ag[p]).slice(0, 3) } : null;
+      return { hvl: m ? m.flip : null, C: A.filter((x) => x.g > 0).sort((p, q) => q.g - p.g).slice(0, 6), P: A.filter((x) => x.g < 0).sort((p, q) => p.g - q.g).slice(0, 6), B: A.slice().sort((p, q) => Math.abs(q.g) - Math.abs(p.g)).slice(0, 30), M }; };
+    return { venc, S, dte: dte(venc, hoy), primero: calc(filas.filter((x) => x.expirationDate === venc)), acum: calc(semana) };
   }
   const gexModo = () => gmGet('ng_gexmodo', 'primero');
   const gexDe = (it) => (it && it.gex ? it.gex[gexModo()] : null);
@@ -943,6 +947,41 @@
 
   // v5.6: los dibujos van en fila; un clic durante un dibujo ya no deja líneas sueltas
   let dibujando = false, dibPendiente = null;
+  const GX_COL = { barP: '#2fbf72', barN: '#ff5c6d', linC: '#2fbf73', linP: '#ff5c6e', hvl: '#29c5f7', marca: '#ffb021', bandaV: '#2fbf74', bandaR: '#ff5c6f' };
+  const GX_MIOS = Object.values(GX_COL);
+  let gxVista = null, gxClave = '', gxCv = null, gxOffsetPrevio = null;
+  // v5.8: el perfil se pinta en una capa propia sobre el gráfico: no crea dibujos en TradingView, no se guarda en la plantilla y sigue zoom y desplazamiento
+  function gxPintaCapa(cv, ch, v, r) {
+    const ts = ch.getTimeScale(), ps = ch.getPanes()[0].getMainSourcePriceScale(), W = r.width, H = r.height, dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, W, H);
+    if (!v) return;
+    const Y = (p) => ps.priceToCoordinate(p), dentro = (y) => y != null && y > -5 && y < H + 5;
+    c.textBaseline = 'middle';
+    for (const l of v.lineas) { const y = Y(l.p); if (!dentro(y)) continue; c.strokeStyle = l.col; c.globalAlpha = 0.75; c.lineWidth = l.w; c.setLineDash(l.est ? [5, 4] : []); c.beginPath(); c.moveTo(0, Math.round(y) + 0.5); c.lineTo(W, Math.round(y) + 0.5); c.stroke(); }
+    c.globalAlpha = 1; c.setLineDash([]);
+    const x0 = W - ts.rightOffset() * ts.barSpacing(), xa = Math.min(Math.max(x0 + 8, 0), W - 270), xStr = xa + 18, b0 = xa + 50, L = Math.max(70, Math.min(W * 0.17, W - b0 - 125));
+    if (v.hvl != null && v.S) { const y1 = Y(v.S), y2 = Y(v.hvl); if (y1 != null && y2 != null) { c.fillStyle = v.S > v.hvl ? GX_COL.bandaV : GX_COL.bandaR; c.globalAlpha = 0.3; c.fillRect(xa, Math.min(y1, y2), 12, Math.abs(y2 - y1)); c.globalAlpha = 1; } }
+    const orden = v.barras.slice().sort((a, b) => (v.etiq[b.k] ? 1 : 0) - (v.etiq[a.k] ? 1 : 0) || b.f - a.f), usadosE = [], usadosS = [];
+    for (const x of orden) { const y = Y(x.p); if (!dentro(y)) continue; const col = x.pos ? GX_COL.barP : GX_COL.barN, x1 = b0 + Math.max(0.03, x.f) * L;
+      c.fillStyle = col; const g = x.f > 0.5 ? 5 : x.f > 0.2 ? 4 : 3; c.globalAlpha = 0.9; c.fillRect(b0, Math.round(y - g / 2), x1 - b0, g); c.globalAlpha = 1;
+      if (!usadosS.some((u) => Math.abs(u - y) < 10)) { usadosS.push(y); c.font = '9px system-ui,sans-serif'; c.fillText(String(x.p), xStr, y - 6); }
+      const e = v.etiq[x.k]; if (e && !usadosE.some((u) => Math.abs(u - y) < 11)) { usadosE.push(y); let xt = x1 + 6; c.font = '600 10px system-ui,sans-serif'; if (e.t) { c.fillStyle = e.col; c.fillText(e.t, xt, y - 6); xt += c.measureText(e.t).width + 7; } if (e.m.length) { c.font = '9px system-ui,sans-serif'; c.fillStyle = GX_COL.marca; c.fillText(e.m.join('  '), xt, y - 6); } } }
+    if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.font = '12px system-ui,sans-serif'; c.fillText('●', b0, y - 8); c.fillStyle = GX_COL.hvl; c.font = '600 10px system-ui,sans-serif'; c.fillText(v.hvlTxt, b0 + 12, y - 8); } }
+  }
+  // Deja sitio a la derecha del precio al encender; al apagar devuelve el margen que había
+  function gxEspacio(ch, on) { try { const ts = ch.getTimeScale(); if (on) { if (gxOffsetPrevio === null && ts.rightOffset() * ts.barSpacing() < ts.width() * 0.3) { gxOffsetPrevio = ts.rightOffset(); ts.setRightOffset(Math.round(ts.width() * 0.3 / ts.barSpacing())); } } else if (gxOffsetPrevio !== null) { ts.setRightOffset(gxOffsetPrevio); gxOffsetPrevio = null; } } catch (e) {} }
+  function gxCiclo() { try {
+    if (window.top !== window.self) return;
+    const api = W.TradingViewApi; if (!api || !api.activeChart) return;
+    const ch = api.activeChart(), w = document.querySelector('.chart-gui-wrapper'); if (!w) return;
+    if (!gxCv || !gxCv.isConnected) { gxCv = document.createElement('canvas'); gxCv.id = 'ng-gex-capa'; gxCv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5;'; w.appendChild(gxCv); gxClave = ''; }
+    const r = w.getBoundingClientRect(), ts = ch.getTimeScale(), pr = ch.getPanes()[0].getMainSourcePriceScale().getVisiblePriceRange(), sym = ch.symbol();
+    const v = gxVista && gxVista.sym === sym ? gxVista : null;
+    const clave = [Math.round(r.width), Math.round(r.height), ts.rightOffset(), ts.barSpacing(), pr && pr.from, pr && pr.to, !!v].join('|');
+    if (clave !== gxClave) { gxClave = clave; gxPintaCapa(gxCv, ch, v, r); }
+  } catch (e) {} }
+  if (window.top === window.self) setInterval(gxCiclo, 200);
   async function dibujar(forzar) {
     if (dibujando) { dibPendiente = !!(dibPendiente || forzar); return; }
     dibujando = true;
@@ -965,18 +1004,22 @@
     const esEtf = String(sym).split(':').pop().toUpperCase() === etf;
     if (on && !esEtf && !it.ratio) return;
     const k = esEtf ? 1 : (it ? it.ratio : 1), dec = esEtf ? 2 : (it ? it.dec : 2);
-    const lineas = [];
-    const add = (strike, tipo, rango, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, rango, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
-    // v5.4: C1–C3, P1–P3, HVL y perfil de barras del modo elegido (botón GEX)
-    const G = on && it ? it.gex : null, gx = G ? gexDe(it) : null, barras = [];
-    if (G && gx) { const tag = gexModo() === 'acum' ? 'Σ4V' : `${G.dte}DTE ${G.venc.slice(5).replace('-', '/')}`;
-      gx.C.forEach((x, i) => add(x.k, 'gexC', i + 1, `C${i + 1} ${tag}`));
-      gx.P.forEach((x, i) => add(x.k, 'gexP', i + 1, `P${i + 1} ${tag}`));
-      if (gx.hvl != null) add(gx.hvl, 'hvl', 1, `HVL ${tag}`);
+    // v5.7: perfil al estilo de escalera: líneas finas sin texto, strikes, barras, etiquetas, marcas y banda precio–HVL
+    const px = (v) => +(v * k).toFixed(dec), lineas = [], barras = [], etiq = {};
+    const G = on && it ? it.gex : null, gx = G ? gexDe(it) : null;
+    let hvlTxt = '';
+    if (G && gx) {
+      gx.C.forEach((x, i) => { etiq[x.k] = { t: `C${i + 1}`, col: GX_COL.linC, m: [] }; if (i < 3) lineas.push({ p: px(x.k), col: GX_COL.linC, w: i === 0 ? 2 : 1, est: i === 0 ? 0 : 2 }); });
+      gx.P.forEach((x, i) => { etiq[x.k] = { t: `P${i + 1}`, col: GX_COL.linP, m: [] }; if (i < 3) lineas.push({ p: px(x.k), col: GX_COL.linP, w: i === 0 ? 2 : 1, est: i === 0 ? 0 : 2 }); });
+      if (gx.hvl != null) { lineas.push({ p: px(gx.hvl), col: GX_COL.hvl, w: 2, est: 0 }); hvlTxt = gexModo() === 'acum' ? 'HVL Σ4V' : `HVL ${G.dte}DTE (${G.venc.slice(5).replace('-', '/')})`; }
+      const marca = (kk, t) => { if (kk == null) return; if (!etiq[kk]) etiq[kk] = { t: '', col: GX_COL.marca, m: [] }; etiq[kk].m.push(t); };
+      if (gx.M) { (gx.M.Ab || []).forEach((kk, i) => marca(kk, `Ab${i + 1}`)); for (const t of ['nCOI', 'COI', 'AbOI', 'nPOI', 'POI']) marca(gx.M[t], t); }
       const mx = Math.max(1, ...gx.B.map((x) => Math.abs(x.g)));
-      for (const x of gx.B) barras.push({ p: +(x.k * k).toFixed(dec), f: Math.abs(x.g) / mx, pos: x.g > 0, k: x.k }); }
-    let res = '60'; try { res = String(ch.resolution()); } catch (e) {}
-    const firma = (on ? 'on|' : 'off|') + sym + '|' + res + '|' + JSON.stringify(lineas.map((l) => l.texto)) + JSON.stringify(barras.map((x) => [x.p, +x.f.toFixed(2)]));
+      for (const x of gx.B) barras.push({ k: x.k, p: px(x.k), f: Math.abs(x.g) / mx, pos: x.g > 0 });
+      // Un strike con marca pero fuera de las 30 barras mayores también se muestra, con barra mínima
+      for (const kk of Object.keys(etiq).map(Number)) if (!barras.some((x) => x.k === kk)) barras.push({ k: kk, p: px(kk), f: 0, pos: etiq[kk].t[0] !== 'P' }); }
+    gxVista = on && G && gx ? { sym, lineas, barras, etiq, S: G.S ? px(G.S) : null, hvl: gx.hvl != null ? px(gx.hvl) : null, hvlTxt } : null; gxEspacio(ch, !!gxVista); gxClave = '';
+    const firma = (on ? 'on|' : 'off|') + sym + '|' + (G ? G.S : '') + '|' + hvlTxt + JSON.stringify(lineas) + JSON.stringify(barras.map((x) => [x.p, +x.f.toFixed(2)])) + JSON.stringify(etiq);
     if (!forzar && firma === ultimaFirma) return;
 
     // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
@@ -984,30 +1027,13 @@
     const ids = idsGuardados();
     const MIA = /^(S·|E·|F·|MAXPAIN |C\d|P\d|HVL |GX )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
     for (const x of ch.getAllShapes() || []) {
-      if (x.name !== 'horizontal_line' && x.name !== 'trend_line') continue;
+      if (!['horizontal_line', 'trend_line', 'text', 'rectangle'].includes(x.name)) continue;
       let txt = '', colB = '';
-      try { const pr = ch.getShapeById(x.id).getProperties() || {}; txt = pr.text || ''; colB = String(pr.linecolor || '').toLowerCase(); } catch (err) {}
+      try { const pr = ch.getShapeById(x.id).getProperties() || {}; txt = pr.text || ''; colB = String(x.name === 'text' || x.name === 'rectangle' ? pr.color || '' : pr.linecolor || '').toLowerCase(); } catch (err) {}
       // v5.5: las barras no llevan texto; se reconocen por su color exclusivo
-      if ((x.name === 'trend_line' && (colB === '#2fbf72' || colB === '#ff5c6d')) || MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
+      if (GX_MIOS.includes(colB) || MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
     }
     const nuevos = [];
-    for (const l of lineas) {
-      try {
-        const id = await ch.createShape({ price: l.p }, {
-          shape: 'horizontal_line', lock: true, disableSelection: false, disableSave: false, text: l.texto,
-          overrides: {
-            linecolor: ESTILO[l.tipo].col, linewidth: l.rango === 1 ? 2 : 1, linestyle: l.rango === 1 ? 0 : 2,
-            showLabel: true, text: l.texto, textcolor: ESTILO[l.tipo].col, fontsize: 11,
-            horzLabelsAlign: 'right', vertLabelsAlign: 'top',
-          },
-        });
-        if (id != null) nuevos.push(id);
-      } catch (err) {}
-    }
-    // Perfil: barras a la derecha del precio; el largo es proporcional al GEX neto de cada strike
-    { const m = /^(\d+)$/.test(res) ? +res * 60 : res === 'D' || res === '1D' ? 86400 : res === 'W' || res === '1W' ? 604800 : 3600, t0 = Math.floor(Date.now() / 1000) + 3 * m;
-      for (const x of barras) { const col = x.pos ? '#2fbf72' : '#ff5c6d';
-        try { const id = await ch.createMultipointShape([{ time: t0, price: x.p }, { time: t0 + Math.max(3, Math.round(x.f * 40)) * m, price: x.p }], { shape: 'trend_line', lock: true, overrides: { linecolor: col, linewidth: x.f > 0.5 ? 4 : 2, showLabel: false, extendLeft: false, extendRight: false } }); if (id != null) nuevos.push(id); } catch (err) {} } }
     ids[sym] = nuevos; guardarIds(ids);
     ultimaFirma = firma;
   }
