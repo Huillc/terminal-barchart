@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.8
+// @version      4.9
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -48,7 +48,12 @@
     const hh = +p.hour % 24, mm = +p.minute;
     return { dia: `${p.year}-${p.month}-${p.day}`, min: hh * 60 + mm, sem: p.weekday };
   }
-  const mercadoAbierto = () => { const t = ny(); return !/Sat|Sun/.test(t.sem) && t.min >= 570 && t.min < 960; };
+  // v4.9: feriados y medias jornadas de la NYSE (calendario hasta 2027; hay que ampliarlo para 2028)
+  const NYSE_FER = ['2026-11-26', '2026-12-25', '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24'];
+  const NYSE_MEDIA = { '2026-11-27': 780, '2026-12-24': 780, '2027-11-26': 780 };
+  const esFeriado = () => NYSE_FER.includes(ny().dia);
+  const cierreHoy = () => NYSE_MEDIA[ny().dia] || 960;
+  const mercadoAbierto = () => { const t = ny(); return !/Sat|Sun/.test(t.sem) && !esFeriado() && t.min >= 570 && t.min < cierreHoy(); };
   const dte = (venc, hoy) => Math.round((Date.parse(venc + 'T12:00:00Z') - Date.parse(hoy + 'T12:00:00Z')) / 864e5);
   const esMensual = (venc) => { const d = new Date(venc + 'T12:00:00Z'); return d.getUTCDay() === 5 && d.getUTCDate() >= 15 && d.getUTCDate() <= 21; };
 
@@ -263,7 +268,7 @@
     // ── 2) DATOS DEL DÍA para el plan (precios, historia diaria, crédito, VIX) ──
     async function datosDia() {
       const t = ny();
-      const q = await api('/proxies/core-api/v1/quotes/get', { symbols: 'DIA,QQQ,GLD,$VIX,HYG,LQD,YM*0,NQ*0,GC*0', fields: 'symbol,lastPrice,previousPrice,openPrice,highPrice,lowPrice,percentChange', raw: 1 });
+      const q = await api('/proxies/core-api/v1/quotes/get', { symbols: 'DIA,QQQ,GLD,$VIX,$VXV,$TRIN,$ADVN,$DECN,HYG,LQD,YM*0,NQ*0,GC*0', fields: 'symbol,lastPrice,previousPrice,openPrice,highPrice,lowPrice,percentChange', raw: 1 });
       const Q = {}; for (const x of q.data || []) { const r = x.raw || x; Q[r.symbol] = r; }
       let eod = gmGet('ng_eod', null);
       if (!eod || eod.dia !== t.dia || !(eod.s.DIA && eod.s.DIA.length >= 205 && eod.s.GLD && eod.s.GLD.length >= 205)) {   // v4.7.1: 230 días para la media 200
@@ -275,12 +280,12 @@
       }
       // v2.7: historia diaria de put/call de Barchart (60 días) → cada activo se compara con SU propio normal
       let pch = gmGet('ng_pchist', null);
-      if (!pch || pch.dia !== t.dia) {
-        pch = { dia: t.dia, s: {} };
+      if (!pch || pch.dia !== t.dia || pch.v !== 2) {   // v4.9: también guarda IV percentil
+        pch = { dia: t.dia, v: 2, s: {} };
         for (const s of Object.keys(ACTIVOS)) {
-          try { const j = await api('/proxies/core-api/v1/options-historical/get', { symbol: s, fields: 'date,putCallVolumeRatio,putCallOpenInterestRatio', orderBy: 'date', orderDir: 'desc', limit: 60, raw: 1 });
+          try { const j = await api('/proxies/core-api/v1/options-historical/get', { symbol: s, fields: 'date,putCallVolumeRatio,putCallOpenInterestRatio,impliedVolatilityRank1y,impliedVolatilityPercentile1y,weightedImpliedVolatility', orderBy: 'date', orderDir: 'desc', limit: 60, raw: 1 });
             const d = (j.data || []).map((x) => x.raw || x).filter((x) => x.date < t.dia);
-            pch.s[s] = { vol: d.map((x) => x.putCallVolumeRatio).filter((x) => x > 0).slice(0, 20), oi: d.map((x) => x.putCallOpenInterestRatio).filter((x) => x > 0).slice(0, 20) }; } catch (e) {}
+            pch.s[s] = { vol: d.map((x) => x.putCallVolumeRatio).filter((x) => x > 0).slice(0, 20), oi: d.map((x) => x.putCallOpenInterestRatio).filter((x) => x > 0).slice(0, 20), ivp: d[0] ? d[0].impliedVolatilityPercentile1y : null, ivr: d[0] ? d[0].impliedVolatilityRank1y : null, iv: d[0] ? d[0].weightedImpliedVolatility : null }; } catch (e) {}
         }
         gmSet('ng_pchist', pch);
       }
@@ -288,7 +293,7 @@
       // v2.3: velas de 5 min de DIA, QQQ y GLD en sesión (VWAP de la fila de lectura + contexto 10:30)
       let b5 = gmGet('ng_b5', null);
       if (!b5 || b5.dia !== t.dia) b5 = { dia: t.dia, s: {} };
-      if (t.min >= 575 && t.min < 965 && !/Sat|Sun/.test(t.sem)) {
+      if (t.min >= 575 && t.min < cierreHoy() + 5 && !/Sat|Sun/.test(t.sem) && !esFeriado()) {
         for (const sym of ['QQQ', 'DIA', 'GLD']) {
           try {
             const L = await serie('/proxies/timeseries/historical/queryminutes.ashx', { symbol: sym, interval: 5, maxrecords: 100, order: 'desc', volume: 'contract', dividends: 'false', backadjust: 'false' });
@@ -314,7 +319,7 @@
 
     // ── 3) REGLAS PROBADAS (las mismas del CLAUDE.md) ──
     const hoyNY = () => ny().dia;
-    const cerrado = () => { const t = ny(); return /Sat|Sun/.test(t.sem) || t.min >= 960; };
+    const cerrado = () => { const t = ny(); return /Sat|Sun/.test(t.sem) || esFeriado() || t.min >= cierreHoy(); };
     const sesionPrevia = (E) => !E || !E.length ? null : (E[E.length - 1].d === hoyNY() && !cerrado() ? E[E.length - 2] : E[E.length - 1]);
     const cierres = (E, live) => { let c = E.map((x) => x.c); if (E.length && E[E.length - 1].d === hoyNY()) c = c.slice(0, -1); return live ? c.concat([live]) : c; };
     function rsi2(C) { const n = C.length; let g = 0, l = 0; for (let k = n - 2; k < n; k++) { const d = C[k] - C[k - 1]; d > 0 ? (g += d) : (l -= d); } return l === 0 ? 100 : 100 - 100 / (1 + g / l); }
@@ -515,7 +520,7 @@
       const D = gmGet('ng_diario', []); let cambio = false; const t = ny();
       for (const x of D) {
         if (x.r != null) continue;
-        if ((x.tipo === 'contexto' || x.tipo === 'impulso') && t.min >= 960 && dd.barras.length && x.dia === t.dia) {
+        if ((x.tipo === 'contexto' || x.tipo === 'impulso') && cerrado() && dd.barras.length && x.dia === t.dia) {
           const k = x.k; let r = null;
           for (const b of dd.barras.filter((b) => b.hm > '10:30')) { const h = b.h * k, l = b.l * k; if (x.d > 0 ? l <= x.sl : h >= x.sl) { r = -1; break; } if (x.d > 0 ? h >= x.tp : l <= x.tp) { r = 2; break; } }
           if (r == null) { const u = dd.barras[dd.barras.length - 1]; r = x.d * (u.c * k - x.ent) / Math.abs(x.ent - x.sl); }
@@ -541,6 +546,31 @@
       return D;
     }
 
+    // ── 5b) REGISTRO (v4.9): cada 15 min en sesión guarda los datos de cada activo para medirlos después. NO genera señales. ──
+    const REG_COLS = ['dia', 'hora', 'sym', 'etf', 'cfd', 'flip', 'muro', 'flujoN', 'flujoAlc', 'flujoBaj', 'callsComp', 'callsVend', 'putsComp', 'putsVend', 'inusN', 'inusAlc', 'inusBaj', 'pcVol', 'pcVolCerca', 'pcOI', 'vwapPct', 'noticias', 'ivPct', 'ivRank', 'iv', 'vix', 'vxv', 'trin', 'adv', 'dec', 'hyg', 'lqd', 'fut'];
+    function registrar() {
+      if (!mercadoAbierto()) return;
+      const t = ny(), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null);
+      if (!data || !dd || !dd.Q || Date.now() - data.t > 10 * 60e3 || Date.now() - dd.t > 5 * 60e3) return;
+      const slot = Math.floor(t.min / 15) * 15, k = 'ng_reg_' + t.dia, L = gmGet(k, []), hora = `${String(Math.floor(slot / 60)).padStart(2, '0')}:${String(slot % 60).padStart(2, '0')}`;
+      if (L.some((x) => x[1] === hora)) return;
+      const q = (s) => (dd.Q[s] ? dd.Q[s].lastPrice : null), fut = { DIA: 'YM', QQQ: 'NQ', GLD: 'GC' };
+      for (const sym of Object.keys(ACTIVOS)) {
+        const it = data.items[sym]; if (!it || it.error) continue;
+        const O = it.opc || {}, F = O.flujo || {}, K = F.k4 || {}, I = O.inus || {}, s = it.semana || {}, H = (dd.pch || {})[sym] || {}, V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), N = noticias(it.nombre);
+        const fk = Object.keys(dd.Q).find((x) => x.startsWith(fut[sym]));
+        L.push([t.dia, hora, sym, q(sym), it.cfd, s.flip, s.muro, F.n, F.alc, F.baj, K.cc, K.cv, K.pc, K.pv, I.n, I.alc, I.baj, O.pcVolTot, O.pcVol, O.pcOI, V ? +V.pct.toFixed(3) : null, N ? N.score : null, H.ivp, H.ivr, H.iv, q('$VIX'), q('$VXV'), q('$TRIN'), q('$ADVN'), q('$DECN'), q('HYG'), q('LQD'), fk ? q(fk) : null]);
+      }
+      gmSet(k, L);
+      const dias = gmGet('ng_reg_dias', []); if (!dias.includes(t.dia)) { dias.push(t.dia); gmSet('ng_reg_dias', dias); }
+    }
+    function exportarRegistro() {
+      const dias = gmGet('ng_reg_dias', []), filas = [REG_COLS.join(',')];
+      for (const d of dias) for (const x of gmGet('ng_reg_' + d, [])) filas.push(x.map((v) => (v == null ? '' : v)).join(','));
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([filas.join('\n')], { type: 'text/csv' }));
+      a.download = 'registro-plan-del-dia-' + hoyNY() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+    }
+
     // ── 6) PANEL "PLAN DEL DÍA" ──
     const host = document.createElement('div');
     host.id = 'ng-host';
@@ -555,11 +585,13 @@
     }
     function fase() {
       const t = ny(); if (/Sat|Sun/.test(t.sem)) return { n: 'MERCADO CERRADO', d: 'fin de semana · el plan del lunes se arma desde la madrugada' };
+      if (esFeriado()) return { n: 'FERIADO EN EE.UU.', d: 'bolsa cerrada · sin señales hoy' };
+      if (NYSE_MEDIA[t.dia] && t.min < cierreHoy()) return { n: 'MEDIA JORNADA', d: `la bolsa cierra a las ${limaDeNY(cierreHoy())} Lima · motor 3 no opera hoy` };
       if (t.min < 480) return { n: 'PREPARACIÓN', d: `armando el plan con futuros nocturnos y gamma del cierre · plan listo ${limaDeNY(480)} Lima` };
       if (t.min < 570) return { n: 'PLAN LISTO', d: `datos fuertes ${limaDeNY(510)} Lima · apertura ${limaDeNY(570)} Lima` };
       if (t.min < 630) return { n: 'APERTURA', d: `primera hora: se mide la estructura · contexto NAS100 a las ${limaDeNY(630)} Lima` };
-      if (t.min < 900) return { n: 'EJECUCIÓN', d: `escenarios activos · cierre de bolsa ${limaDeNY(960)} Lima` };
-      if (t.min < 960) return { n: 'CIERRE', d: `ventana del rebote de pánico (se compra al cierre, ${limaDeNY(960)} Lima)` };
+      if (t.min < cierreHoy() - 60) return { n: 'EJECUCIÓN', d: `escenarios activos · cierre de bolsa ${limaDeNY(cierreHoy())} Lima` };
+      if (t.min < cierreHoy()) return { n: 'CIERRE', d: `ventana del rebote de pánico (se compra al cierre, ${limaDeNY(cierreHoy())} Lima)` };
       return { n: 'MERCADO CERRADO', d: 'resultados del día al diario · el plan de mañana se arma desde la madrugada' };
     }
     // v4.7: CAÍDA RÁPIDA (EN PRUEBA) — comprar al cierre si el precio cayó más de 2,5 ATR desde el máximo de 5 días y está sobre la media de 200;
@@ -567,7 +599,7 @@
     function caida(dd, sym) {
       const E = dd.eod[sym], q = dd.Q[sym];
       if (!E || E.length < 205 || !q || !(q.lastPrice > 0)) return { estado: 'faltan datos' };
-      const tt = ny(), hoyH = !/Sat|Sun/.test(tt.sem) && tt.min >= 570, Ec = E.filter((x) => x.d < hoyNY());   // sesiones anteriores + hoy (en vivo o ya cerrado)
+      const tt = ny(), hoyH = !/Sat|Sun/.test(tt.sem) && !esFeriado() && tt.min >= 570, Ec = E.filter((x) => x.d < hoyNY());   // sesiones anteriores + hoy (en vivo o ya cerrado)
       let a = null; for (let i = 1; i < Ec.length; i++) { const tr = Math.max(Ec[i].h - Ec[i].l, Math.abs(Ec[i].h - Ec[i - 1].c), Math.abs(Ec[i].l - Ec[i - 1].c)); a = a == null ? tr : (a * 13 + tr) / 14; }
       const vivo = hoyH, px = q.lastPrice;
       const C = Ec.map((x) => x.c).concat(vivo ? [px] : []);
@@ -602,42 +634,52 @@
         // v4.7.3: línea ENTRAR por activo (precio del CFD)
         { const g = c.gat, okG = g > c.sma200, ob = g + 0.5 * c.atr, st = g - 4 * c.atr;
           p2e += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${c.señal && !cerrado() ? '#2fbf71' : okG ? '#3b5878' : '#2a3340'};background:${c.señal && !cerrado() ? '#0c2a1b' : '#0b1118'}"><b>${nm}</b> · ` +
-            (c.señal && !cerrado() && ny().min >= 945 ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${k ? f(c.px * k, d) : '—'}</b> (confirmado al cierre: entra antes de las ${limaDeNY(959)} Lima) · objetivo <b>${k ? f(c.obj * k, d) : '—'}</b> · stop <b>${k ? f(c.stop * k, d) : '—'}</b> · máx 20 días`
-            : c.señal && !cerrado() ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(945)} y ${limaDeNY(959)} Lima (cierre); si sigue así, aquí dirá "AHORA PUEDES ENTRAR" y sonará un aviso · hoy ~${k ? f(c.px * k, d) : '—'}, objetivo ${k ? f(c.obj * k, d) : '—'}, stop ${k ? f(c.stop * k, d) : '—'}</span>`
+            (c.señal && !cerrado() && ny().min >= cierreHoy() - 15 ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${k ? f(c.px * k, d) : '—'}</b> (confirmado al cierre: entra antes de las ${limaDeNY(cierreHoy() - 1)} Lima) · objetivo <b>${k ? f(c.obj * k, d) : '—'}</b> · stop <b>${k ? f(c.stop * k, d) : '—'}</b> · máx 20 días`
+            : c.señal && !cerrado() ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(cierreHoy() - 15)} y ${limaDeNY(cierreHoy() - 1)} Lima (cierre); si sigue así, aquí dirá "AHORA PUEDES ENTRAR" y sonará un aviso · hoy ~${k ? f(c.px * k, d) : '—'}, objetivo ${k ? f(c.obj * k, d) : '—'}, stop ${k ? f(c.stop * k, d) : '—'}</span>`
             : !c.ok.tend ? `<b class="m">▲ COMPRA: no</b> <span class="m">(bajo la media 200 = ${k ? f(c.sma200 * k, d) : '—'}) · </span><b class="m">▼ VENTA: no</b> <span class="m">— la venta espejo (subida rápida bajo la media 200) se probó 2007–26 y PIERDE (−0,14 a −0,79 %/op) → hoy no hay operación de esta estrategia</span>`
             : !okG ? `<span class="m">▲ COMPRA no aplica ${c.manana ? 'mañana' : 'hoy'}: el gatillo (${k ? f(g * k, d) : '—'}) queda bajo la media 200 (${k ? f(c.sma200 * k, d) : '—'}) · ▼ VENTA: no (probada, pierde)</span>`
             : `<b class="m">○ AÚN NO · no entres</b> <span class="m">— el terminal te avisará "AHORA PUEDES ENTRAR" solo si ${c.manana ? 'mañana' : 'hoy'} cierra en ${k ? f(g * k, d) : '—'} o menos (ahora ${k ? f(c.px * k, d) : '—'}, falta ${k ? f((c.px - g) * k, d) : '—'}) · objetivo ≈ ${k ? f(ob * k, d) : '—'} · stop ≈ ${k ? f(st * k, d) : '—'}</span>`) + '</div>'; }
         // v4.7.4: aviso (sonido + notificación) una sola vez por día y activo cuando se confirma
-        if (c.señal && !cerrado() && ny().min >= 945) avisar('cd_' + sym + '_' + hoy, `✅ ${nm}: AHORA PUEDES ENTRAR (compra)`, `~${k ? f(c.px * k, d) : ''} · objetivo ${k ? f(c.obj * k, d) : ''} · stop ${k ? f(c.stop * k, d) : ''} · antes de las ${limaDeNY(959)} Lima`);
-        if (c.señal && !cerrado()) { autos++; if (ny().min >= 945) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
+        if (c.señal && !cerrado() && ny().min >= cierreHoy() - 15) avisar('cd_' + sym + '_' + hoy, `✅ ${nm}: AHORA PUEDES ENTRAR (compra)`, `~${k ? f(c.px * k, d) : ''} · objetivo ${k ? f(c.obj * k, d) : ''} · stop ${k ? f(c.stop * k, d) : ''} · antes de las ${limaDeNY(cierreHoy() - 1)} Lima`);
+        if (c.señal && !cerrado()) { autos++; if (ny().min >= cierreHoy() - 15) anotar({ id: 'cd_' + sym + '_' + hoy, tipo: 'caida', sym, dia: hoy, ent: c.px, obj: c.obj, stop: c.stop }); }
         const E = it && !it.error ? escenarios(sym, it, dd) : null;
         if (E && E.modo) p5 += pill(E.modo === 'AMPLIO' ? 'fd' : 'fu', `${nm} día <b>${E.modo}</b>`);
       }
       const Pn = panico(dd), P = proximoDato(), cap = gmGet('ng_capital', null);
+      // v4.9: POSIBLE DÍA GRANDE — avisa del tamaño, NO de la dirección. DIA 2020–26: IV percentil ≥ 75 → movimiento medio 0,94 % vs 0,69 %.
+      let dgh = '';
+      { const vxv = dd.Q['$VXV'] && dd.Q['$VXV'].lastPrice, vixL = dd.Q['$VIX'] && dd.Q['$VIX'].lastPrice, ratio = vxv > 0 && vixL > 0 ? vixL / vxv : null, evento = P && !P.fin && P.imp >= 3, grandes = [];
+        for (const sym of Object.keys(ACTIVOS)) { const H = (dd.pch || {})[sym] || {}, it = data.items[sym], s = it && it.semana, ivp = H.ivp == null ? null : H.ivp * 100; if (ivp == null) continue;
+          const bajo = s && s.flip && it.spot < s.flip, on = ivp >= 75; if (on) grandes.push(ACTIVOS[sym].nombre);
+          dgh += pill(on ? 'fa' : 'fn', `${ACTIVOS[sym].nombre} IV percentil <b>${ivp.toFixed(0)} %</b>${bajo ? ' · bajo el flip' : ''}`); }
+        dgh += pill(ratio >= 0.95 ? 'fa' : 'fn', `VIX/VXV ${ratio == null ? '—' : ratio.toFixed(2)}`) + (evento ? pill('fd', 'dato fuerte hoy') : '');
+        if (grandes.length && !cerrado()) avisar('dg_' + hoy, '⚡ Posible día grande: ' + grandes.join(', '), 'Volatilidad alta: puede moverse más de lo normal. No indica dirección; revisa stop y tamaño.');
+        dgh = (grandes.length ? `<b class="am">⚡ POSIBLE DÍA GRANDE: ${grandes.join(', ')}</b> <span class="m">— no indica dirección; 9 de cada 10 veces no llega a ±2 %</span><br>` : '<span class="m">Volatilidad normal: sin aviso.</span><br>') + dgh; }
       const p3 = Pn.rsi == null ? pill('fn', 'faltan datos') : pill(Pn.señal ? 'fu' : Pn.cerca ? 'fa' : 'fn', Pn.señal ? '<b>● REBOTE DE PÁNICO ACTIVO</b> (NAS100, comprar al cierre)' : `RSI2 NAS100 ${Pn.rsi.toFixed(1)} (necesita &lt; 10) · crédito ${Pn.ok.cred ? 'sano' : 'débil'}`);
-      if (Pn.señal) autos++;
+      if (Pn.señal && !cerrado()) autos++;
       const p4 = P ? pill(P.fin ? 'fn' : P.imp >= 3 ? 'fd' : 'fa', P.fin ? 'ya salieron los datos de hoy' : `${P.h} Lima · ${P.n} ${P.imp >= 3 ? '(FUERTE: no entrar 15 min antes/después)' : ''}`) : pill('fn', 'sin calendario (abre el Terminal)');
       // v4.8: SISTEMA 4G — motor 2 (pánico NAS100) y motor 3 (tarde bajista NAS100/US30)
-      const tm = ny().min, abierto = !/Sat|Sun/.test(ny().sem) && tm >= 570 && tm < 960;
+      const tm = ny().min, abierto = mercadoAbierto(), completa = cierreHoy() === 960;
       let m4 = '';
-      { const q = CD.QQQ, okVent = abierto && tm >= 945;
+      { const q = CD.QQQ, okVent = abierto && tm >= cierreHoy() - 15;
         m4 += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${Pn.señal && okVent ? '#2fbf71' : '#2a3340'};background:${Pn.señal && okVent ? '#0c2a1b' : '#0b1118'}"><b>Motor 2 · Rebote de pánico · NAS100</b> · ` +
           (Pn.rsi == null ? '<span class="m">faltan datos</span>'
-          : Pn.señal && okVent ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${q && q.k ? f(dd.Q.QQQ.lastPrice * q.k, 0) : '—'}</b> (antes de las ${limaDeNY(959)} Lima) · salida: primer cierre sobre ${q && q.k ? f(Pn.prevHigh * q.k, 0) : '—'} o a los 5 días · <span class="m">71 %, +0,31 %/op</span>`
-          : Pn.señal && abierto ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(945)} y ${limaDeNY(959)} Lima</span>`
+          : Pn.señal && okVent ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${q && q.k ? f(dd.Q.QQQ.lastPrice * q.k, 0) : '—'}</b> (antes de las ${limaDeNY(cierreHoy() - 1)} Lima) · salida: primer cierre sobre ${q && q.k ? f(Pn.prevHigh * q.k, 0) : '—'} o a los 5 días · <span class="m">71 %, +0,31 %/op</span>`
+          : Pn.señal && abierto ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(cierreHoy() - 15)} y ${limaDeNY(cierreHoy() - 1)} Lima</span>`
           : `<b class="m">○ AÚN NO</b> <span class="m">— RSI2 ${Pn.rsi.toFixed(1)} (necesita &lt; 10), ${Pn.ok.tend ? 'sobre' : 'bajo'} media 200, crédito ${Pn.ok.cred ? 'sano' : 'débil'}</span>`) + '</div>';
-        if (Pn.señal && okVent) { autos++; avisar('pn_' + hoy, '✅ NAS100: AHORA PUEDES ENTRAR (rebote de pánico)', 'compra al cierre · salida en el primer cierre sobre el máximo de ayer o a los 5 días'); } }
+        if (Pn.señal && okVent) { autos++; avisar('pn_' + hoy, '✅ NAS100: AHORA PUEDES ENTRAR (rebote de pánico)', 'compra al cierre · salida en el primer cierre sobre el máximo de ayer o a los 5 días'); anotar({ id: 'pn_' + hoy, tipo: 'panico', dia: hoy, ent: dd.Q.QQQ.lastPrice, prevHigh: Pn.prevHigh }); } }
       for (const sym of ['QQQ', 'DIA']) { const X = CD[sym]; if (!X) continue; const { c, k, nm, d } = X;
-        const bajo = !c.ok.tend, ven = abierto && tm >= 750 && tm <= 870, antes = abierto && tm < 750;
+        const bajo = !c.ok.tend, ven = abierto && completa && tm >= 750 && tm <= 870, antes = abierto && completa && tm < 750;
         m4 += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${bajo && ven ? '#2fbf71' : '#2a3340'};background:${bajo && ven ? '#0c2a1b' : '#0b1118'}"><b>Motor 3 · Tarde bajista · ${nm}</b> · ` +
           (!bajo ? `<span class="m">○ no aplica: ${nm} está SOBRE la media 200 (${k ? f(c.sma200 * k, d) : '—'}); solo funciona bajo la media</span>`
-          : ven ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${k ? f(c.px * k, d) : '—'}</b> (ventana ${limaDeNY(750)}–${limaDeNY(870)} Lima) · <b>salida: al cierre ${limaDeNY(959)} Lima</b> · sin objetivo · <span class="m">56 %, +0,07–0,08 %/op · solo con spread bajo</span>`
-          : antes ? `<b class="am">◐ HOY SE ACTIVA a las ${limaDeNY(750)} Lima</b> <span class="m">— ${nm} bajo la media 200; compra entre ${limaDeNY(750)} y ${limaDeNY(870)}, cierra a las ${limaDeNY(959)}</span>`
+          : ven ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${k ? f(c.px * k, d) : '—'}</b> (ventana ${limaDeNY(750)}–${limaDeNY(870)} Lima) · <b>salida: al cierre ${limaDeNY(cierreHoy() - 1)} Lima</b> · sin objetivo · <span class="m">56 %, +0,07–0,08 %/op · solo con spread bajo</span>`
+          : antes ? `<b class="am">◐ HOY SE ACTIVA a las ${limaDeNY(750)} Lima</b> <span class="m">— ${nm} bajo la media 200; compra entre ${limaDeNY(750)} y ${limaDeNY(870)}, cierra a las ${limaDeNY(cierreHoy() - 1)}</span>`
           : `<span class="m">${nm} bajo la media 200 → mañana se activa de ${limaDeNY(750)} a ${limaDeNY(870)} Lima (compra) y se cierra al cierre</span>`) + '</div>';
-        if (bajo && ven) { autos++; avisar('tb_' + sym + '_' + hoy, `✅ ${nm}: AHORA PUEDES ENTRAR (tarde bajista)`, `compra ~${k ? f(c.px * k, d) : ''} · cerrar al cierre (${limaDeNY(959)} Lima)`); anotar({ id: 'tb_' + sym + '_' + hoy, tipo: 'tarde', sym, dia: hoy, ent: c.px }); } }
+        if (bajo && ven) { autos++; avisar('tb_' + sym + '_' + hoy, `✅ ${nm}: AHORA PUEDES ENTRAR (tarde bajista)`, `compra ~${k ? f(c.px * k, d) : ''} · cerrar al cierre (${limaDeNY(cierreHoy() - 1)} Lima)`); anotar({ id: 'tb_' + sym + '_' + hoy, tipo: 'tarde', sym, dia: hoy, ent: c.px }); } }
       const ver = autos ? `<b class="up">HOY HAY SEÑAL MEDIDA</b> — opera solo esa, con su stop y su objetivo` : buenas >= 2 ? `<b class="am">SIN SEÑAL MEDIDA</b> — si operas: tamaño reducido, solo con retest + confirmación y a favor de la media 200` : `<b class="am">MERCADO BAJO LA MEDIA 200</b> — no compres caídas; la única operación medida es el motor 3 (tarde bajista, compra de ${limaDeNY(750)} a ${limaDeNY(870)} y cierra al cierre)`;
       let h = `<div class="c" style="flex-basis:100%"><h4><span>✅ RUTINA DE LA MAÑANA · 8 puntos</span><span class="m" style="font-size:11px">1–5 automáticos · 6–8 los marcas tú · se reinicia cada día ${window.Notification && Notification.permission !== 'granted' ? '<button id="ntf">🔔 activar avisos</button>' : '🔔 avisos activos'}</span></h4>`;
       h += `<div class="gen" style="color:#cfe1ff">${ver}</div>`;
+      h += fila('⚡', 'Aviso de día grande (tamaño, no dirección) · EN PRUEBA', dgh);
       h += fila('★', 'SISTEMA 4G · motores 2 y 3 (el motor 1 = caída rápida está en el punto 2)', m4 + '<span class="m">Sistema 2015–26 (1/3 de la cuenta por operación): 11 de 12 años positivos, 76 % de meses positivos, +5,2 %/año, peor caída −10,6 %. Máximo 3 operaciones abiertas a la vez.</span>');
       h += fila(1, 'Tendencia diaria (media de 200)', p1 + '<span class="m"> sobre = solo compras en caídas · bajo = operar menos</span>');
       h += fila(2, 'Señal de alto acierto: caída rápida', p2 + p2e + '<span class="pr">EN PRUEBA</span> <span class="m">caída &gt; 2,5 ATR desde el máx. de 5 días + sobre media 200 · ETF 2007–26: ~92 % de acierto en los 3 · obj +0,5 ATR, stop −4 ATR: <b>cada pérdida borra ~8 ganancias</b>, no muevas el stop</span>');
@@ -654,6 +696,8 @@
       // v3.4: plegado = botón chico abajo a la izquierda, para no tapar el menú de Barchart
       host.style.cssText = abierto ? 'position:fixed;left:0;right:0;top:0;z-index:2147483646;' : 'position:fixed;left:10px;bottom:10px;z-index:2147483646;';
       if (!abierto) {
+        // v4.9: con el panel plegado también se evalúan las señales, suenan los avisos y se anota el diario
+        if (data && dd) { try { rutinaHTML(data, dd); } catch (e) {} }
         sh.innerHTML = `<style>:host{all:initial}button{font:600 13px system-ui,Segoe UI,Arial,sans-serif;background:#0b1520;color:#cfe1ff;border:1px solid #3b5878;border-radius:999px;padding:7px 14px;cursor:pointer;box-shadow:0 2px 10px #000a}button:hover{background:#13263a}</style><button id="tg" title="${F.n}">📋 Plan del Día ▾</button><button id="ac" style="display:none"></button>`;
         sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', true); pintar(); };
         return;
@@ -686,7 +730,7 @@
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
-      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span>${(() => { const o = gmGet('ng_oanda', null); return `<button id="oa" title="Conectar precio en vivo de OANDA">${o ? (dd && dd.px && dd.px._error ? '⚠ OANDA' : '● OANDA') : 'OANDA'}</button>`; })()}<button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
+      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span>${(() => { const o = gmGet('ng_oanda', null); return `<button id="oa" title="Conectar precio en vivo de OANDA">${o ? (dd && dd.px && dd.px._error ? '⚠ OANDA' : '● OANDA') : 'OANDA'}</button>`; })()}<button id="exp" title="Descargar el registro de datos">📥 registro (${gmGet('ng_reg_dias', []).length} d)</button><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
       if (abierto && data && dd) {
         const cap = gmGet('ng_capital', null);
         h += '<div class="g">';
@@ -708,8 +752,8 @@
             if (C.señal) { h += `<div class="sem si"><b class="${C.d > 0 ? 'up' : 'dn'}">● ENTRAR · ${C.d > 0 ? 'COMPRA' : 'VENTA'} ${f(C.ent, 0)}</b> · stop ${f(C.sl, 0)} · objetivo ${f(C.tp, 0)} (2R) · riesgo ${f(C.risk, 0)} pts<br><span class="m">Entrada de contexto 10:30 NY · 7 años: 48 % acierto, +0,19 R/op</span><span class="pr">en prueba</span>${cap ? `<br><span class="m">tamaño para 0,5 %: ${f(cap * 0.005 / C.risk, 2)} USD por punto</span>` : ''}</div>`;
               anotar({ id: 'ctx_' + ny().dia, tipo: 'contexto', dia: ny().dia, d: C.d, ent: C.ent, sl: C.sl, tp: C.tp, k: it.ratio }); }
             else h += `<div class="sem"><b class="m">○ Contexto 10:30</b> <span class="m">${C.estado}</span></div>`;
-            if (Pn.señal) { h += `<div class="sem si"><b class="up">● REBOTE DE PÁNICO ACTIVO</b> · comprar al cierre (${limaDeNY(955)} Lima) · salir en el primer cierre sobre ${f(Pn.prevHigh * it.ratio, 0)} o a los 5 días<br><span class="m">RSI2 ${Pn.rsi.toFixed(1)} · sobre la media de 200 · crédito sano · 2007–2026: 71 % acierto, +0,31 %/op</span><span class="pr ok">probado 19 años</span></div>`;
-              if (ny().min >= 900) anotar({ id: 'pn_' + ny().dia, tipo: 'panico', dia: ny().dia, ent: dd.Q.QQQ.lastPrice, prevHigh: Pn.prevHigh }); }
+            if (Pn.señal) { h += `<div class="sem si"><b class="up">● REBOTE DE PÁNICO ACTIVO</b> · comprar al cierre (${limaDeNY(cierreHoy() - 5)} Lima) · salir en el primer cierre sobre ${f(Pn.prevHigh * it.ratio, 0)} o a los 5 días<br><span class="m">RSI2 ${Pn.rsi.toFixed(1)} · sobre la media de 200 · crédito sano · 2007–2026: 71 % acierto, +0,31 %/op</span><span class="pr ok">probado 19 años</span></div>`;
+              if (mercadoAbierto() && ny().min >= cierreHoy() - 15) anotar({ id: 'pn_' + ny().dia, tipo: 'panico', dia: ny().dia, ent: dd.Q.QQQ.lastPrice, prevHigh: Pn.prevHigh }); }
             else if (Pn.rsi != null) h += `<div class="sem ${Pn.cerca ? 'cer' : ''}"><b class="${Pn.cerca ? 'am' : 'm'}">${Pn.cerca ? '◐ Pánico cerca' : '○ Rebote de pánico'}</b> <span class="m">RSI2 ${Pn.rsi.toFixed(1)} (necesita &lt; 10) · ${Pn.ok.tend ? 'sobre' : 'bajo'} media 200 · crédito ${Pn.ok.cred ? 'sano' : 'débil'} (${(Pn.cred * 100).toFixed(1)} %)</span></div>`;
           } else h += `<div class="sem"><b class="m">○ Sin señal probada para ${it.nombre}</b> <span class="m">· solo escenarios en prueba (riesgo reducido)</span></div>`;
           // escenarios
@@ -730,6 +774,7 @@
       { const bN = sh.querySelector('.b'); if (bN && scr) bN.scrollTop = scr; }
       sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', !gmGet('ng_abierto', true)); pintar(); };
       sh.getElementById('ac').onclick = () => { ciclo(true); cicloDia(true); };
+      { const eb = sh.getElementById('exp'); if (eb) eb.onclick = exportarRegistro; }
       { const b = sh.getElementById('oa'); if (b) b.onclick = () => {
         const o = gmGet('ng_oanda', null);
         if (o && !confirm('OANDA ya está conectado (' + (o.env === 'demo' ? 'demo' : 'real') + ').\nAceptar = cambiar token · Cancelar = dejarlo')) return;
@@ -758,7 +803,7 @@
       const ttl = activo ? 60e3 : 15 * 60e3, lock = gmGet('ng_dlock', 0);
       if (!forzar && ((dd && Date.now() - dd.t < ttl) || Date.now() - lock < 50e3)) { pintar(); return; }
       corriendoDia = true; gmSet('ng_dlock', Date.now());
-      try { await datosDia(); } catch (e) {} finally { corriendoDia = false; gmSet('ng_dlock', 0); pintar(); }
+      try { await datosDia(); try { registrar(); } catch (e) {} } catch (e) {} finally { corriendoDia = false; gmSet('ng_dlock', 0); pintar(); }
     }
     pintar();
     setTimeout(() => cicloDia(false), 3000);
