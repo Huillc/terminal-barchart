@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.10
+// @version      5.11
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -29,7 +29,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 38; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 39; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -68,7 +68,7 @@
 
   // Mapa de gamma con la misma convención que tus terminales (call − put:
   // supone clientes que venden calls y compran puts).
-  function mapa(filas, S, hoy) {
+  function mapa(filas, S, hoy, rangoFlip) {
     const f = filas.filter((x) => x.openInterest > 0);
     if (!f.length) return null;
     const net = {};
@@ -79,7 +79,8 @@
     // flip: precio hipotético donde la gamma total cambia de signo (se reprecia la cadena)
     const tot = (s) => { let t = 0; for (const x of f) t += bsGamma(s, x.strikePrice, Math.max(1, dte(x.expirationDate, hoy)) / 365, ivDe(x)) * x.openInterest * (x.optionType === 'Call' ? 1 : -1); return t; };
     let flip = null, prev = null;
-    for (let s = S * 0.95; s <= S * 1.05; s += S * 0.0005) {
+    const rf = rangoFlip || 0.05; // v5.11: el perfil GEX busca el HVL en ±12 %; el plan sigue en ±5 %
+    for (let s = S * (1 - rf); s <= S * (1 + rf); s += S * 0.0005) {
       const v = tot(s);
       if (prev && (prev[1] < 0) !== (v < 0) && v !== prev[1]) {
         const c = prev[0] + (0 - prev[1]) / (v - prev[1]) * (s - prev[0]);
@@ -101,7 +102,7 @@
     const calc = (L) => { const n = {}, co = {}, po = {}, ag = {};
       for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0) || Math.abs(x.strikePrice / S - 1) > 0.1) continue; const g = x.gamma * x.openInterest * 100 * S * S * 0.01, c = x.optionType === 'Call', k = x.strikePrice;
         n[k] = (n[k] || 0) + (c ? g : -g); ag[k] = (ag[k] || 0) + g; const d = c ? co : po; d[k] = (d[k] || 0) + x.openInterest; }
-      const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy);
+      const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy, 0.12);
       // v5.7: marcas por strike (definición propia; se calculan con OI y gamma de Barchart)
       const ks = Object.keys(n).map(Number), top = (f) => { let b = null, bv = -Infinity; for (const k of ks) { const v = f(k); if (v > bv) { bv = v; b = k; } } return b; }, oc = (k) => co[k] || 0, op = (k) => po[k] || 0;
       const M = ks.length ? { COI: top(oc), POI: top(op), nCOI: top((k) => oc(k) - op(k)), nPOI: top((k) => op(k) - oc(k)), AbOI: top((k) => oc(k) + op(k)), Ab: ks.slice().sort((p, q) => ag[q] - ag[p]).slice(0, 3) } : null;
@@ -974,7 +975,7 @@
       if (!usadosS.some((u) => Math.abs(u - y) < 9)) { usadosS.push(y); c.font = '9px ' + FUENTE; c.fillStyle = col; c.globalAlpha = 0.45 + 0.55 * x.f; c.fillText(String(x.p), xa, y - 5); c.globalAlpha = 1; }
       const e = v.etiq[x.k]; if (e && !usadosE.some((u) => Math.abs(u - y) < 9)) { usadosE.push(y); let xt = b0 + largo + 14; c.font = '10px ' + FUENTE; if (e.t) { c.fillStyle = e.col; c.globalAlpha = 0.45 + 0.55 * x.f; c.fillText(e.t, xt, y); c.globalAlpha = 1; xt += c.measureText(e.t).width + 12; }
         c.font = '9px ' + FUENTE; for (const m of e.m) { c.fillStyle = /^Ab\d/.test(m) ? GX_COL.marcaAb : GX_COL.marca; c.fillText(m, xt, y); xt += c.measureText(m).width + 8; } } }
-    if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { c.font = '9px ' + FUENTE; c.fillStyle = '#b6bec7'; c.fillText(String(Math.round(v.hvl)), xa, y - 5); c.beginPath(); c.arc(b0 + 4, y, 4, 0, 7); c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.fill(); c.font = '10px ' + FUENTE; c.fillStyle = GX_COL.hvl; c.fillText(v.hvlTxt, b0 + 16, y); } }
+    if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { const yb = v.barras.some((x) => { const q = Y(x.p); return q != null && Math.abs(q - y) < 11; }) ? y - 12 : y; c.font = '9px ' + FUENTE; c.fillStyle = '#b6bec7'; if (!usadosS.some((u) => Math.abs(u - y) < 9)) c.fillText(String(Math.round(v.hvl)), xa, y - 5); c.beginPath(); c.arc(b0 + 4, yb, 4, 0, 7); c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.fill(); c.font = '10px ' + FUENTE; c.fillStyle = GX_COL.hvl; c.fillText(v.hvlTxt, b0 + 16, yb); } }
     if (v.viejo) { c.font = '600 12px system-ui,sans-serif'; c.fillStyle = '#ffd166'; c.fillText('Datos viejos: pulsa F5 en TODAS las pestañas de Barchart', 12, 118); }
   }
   // Deja sitio a la derecha del precio al encender; al apagar devuelve el margen que había
