@@ -7,7 +7,7 @@ indicator("Liquidez 4H", overlay = true, max_lines_count = 40, max_labels_count 
 grpA = "Qué mostrar"
 nArriba = input.int(3, "Niveles pendientes arriba", minval = 0, maxval = 10, group = grpA)
 nAbajo = input.int(3, "Niveles pendientes abajo", minval = 0, maxval = 10, group = grpA)
-verSueltos = input.bool(true, "Incluir giros con reacción ($)", group = grpA)
+verSueltos = input.bool(false, "Incluir giros con reacción ($)", group = grpA)
 verLineas = input.bool(true, "Incluir líneas de tendencia", group = grpA)
 grpB = "Criterio"
 tf = input.timeframe("240", "Temporalidad", group = grpB)
@@ -15,8 +15,8 @@ velas = input.int(5, "Velas a cada lado del giro", minval = 2, maxval = 20, grou
 tol = input.float(0.25, "Tolerancia de iguales y de línea (en ATR)", minval = 0.05, maxval = 1.0, step = 0.05, group = grpB)
 minReac = input.float(2.0, "Reacción mínima de un giro suelto (en ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = grpB)
 grpC = "Colores"
-colAlta = input.color(#ff5c6c, "Liquidez arriba", group = grpC)
-colBaja = input.color(#2fbf71, "Liquidez abajo", group = grpC)
+colAlta = input.color(#e6e9ee, "Liquidez arriba", group = grpC)
+colBaja = input.color(#e6e9ee, "Liquidez abajo", group = grpC)
 
 const int MAX_GUARDADOS = 40
 
@@ -139,10 +139,11 @@ dibujar(array<Liq> z, int n, int lado, color c) =>
             for j = 0 to math.min(n, orden.size()) - 1
                 Liq k = z.get(idx.get(orden.get(j)))
                 bool fuerte = k.toques >= 2 or k.inclinada
-                float pFin = precioEn(k, time)
-                lineas.push(line.new(k.t1, k.p1, time, pFin, xloc = xloc.bar_time, color = color.new(c, fuerte ? 0 : 35), width = fuerte ? 2 : 1, style = line.style_solid))
-                string txt = (fuerte ? "$$$ " : "$ ") + str.tostring(pFin, format.mintick)
-                textos.push(label.new(time, pFin, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = c, size = size.small))
+                // Línea de punto a punto: del primer toque al último, con el texto encima (arriba) o debajo (abajo)
+                int tFin = fuerte ? k.t2 : k.t1 + (time - k.t1) / 6
+                lineas.push(line.new(k.t1, k.p1, tFin, k.p2, xloc = xloc.bar_time, color = color.new(c, fuerte ? 0 : 35), width = 1, style = line.style_solid))
+                int tTxt = (k.t1 + tFin) / 2
+                textos.push(label.new(tTxt, (k.p1 + k.p2) / 2, fuerte ? "$$$" : "$", xloc = xloc.bar_time, style = lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small))
 
 if barstate.islast
     for l in lineas
