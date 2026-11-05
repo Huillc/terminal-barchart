@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.2
+// @version      5.3
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -29,7 +29,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 34; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 35; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -93,6 +93,17 @@
       flip: flip == null ? null : +flip.toFixed(2),
       muro: muro ? muro[0] : null, iman: iman ? iman[0] : null,
     };
+  }
+
+  // v5.3: niveles GEX del primer vencimiento (0DTE si existe; si no, el siguiente). Solo referencia visual: los muros no probaron ser freno.
+  function gexNiveles(filas, S, hoy, venc, semana) {
+    const expo = (L) => { const C = {}, P = {}; for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0)) continue; if (Math.abs(x.strikePrice / S - 1) > 0.1) continue; const g = x.gamma * x.openInterest * 100 * S * S * 0.01, d = x.optionType === 'Call' ? C : P; d[x.strikePrice] = (d[x.strikePrice] || 0) + g; } return { C, P }; };
+    const top = (o, n) => Object.entries(o).map(([k, v]) => [+k, v]).sort((a, b) => b[1] - a[1]).slice(0, n);
+    const f = filas.filter((x) => x.expirationDate === venc), a = expo(f), b = expo(semana), m = mapa(f, S, hoy);
+    const fuerteC = new Set(top(b.C, 3).map((x) => x[0])), fuerteP = new Set(top(b.P, 3).map((x) => x[0]));
+    return { venc, dte: dte(venc, hoy), hvl: m ? m.flip : null,
+      C: top(a.C, 5).map((x) => ({ k: x[0], g: Math.round(x[1]), sem: fuerteC.has(x[0]) })),
+      P: top(a.P, 5).map((x) => ({ k: x[0], g: Math.round(x[1]), sem: fuerteP.has(x[0]) })) };
   }
 
   // Max pain de UN vencimiento (como lo publica Barchart, no sumando varios)
@@ -251,6 +262,7 @@
             cfd: c, fuenteCfd: cReal ? ((cfd._src && cfd._src[a.cfd]) || 'CFD OANDA') : (cIdx ? 'índice ' + a.idx + ' (aprox.)' : null),
             ratio: c ? c / S : null,
             opc,
+            gex: vCerca ? gexNiveles(ch, S, hoy, vCerca, ch.filter((x) => semV.includes(x.expirationDate))) : null,
             semana: mapa(ch.filter((x) => semV.includes(x.expirationDate)), S, hoy),
             estructural: mapa(ch.filter((x) => estV.includes(x.expirationDate)), S, hoy),
             maxPain: {
@@ -740,7 +752,7 @@
         }
         if (st === 'ent') E.push(nm); if (st === 'ate') A.push(nm);
         const V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), Es = escenarios(sym, it, dd), ref = px || it.cfd, cerca = c.atr && k ? c.atr * k * 0.15 : 0,   // v5.1: sin max pain (probado, no funciona) ni niveles pegados al precio
-          L = ((Es && Es.N) || []).map((x) => ({ v: x.v, n: x.n.split(' + ').filter((t) => t !== 'max pain').join(' + ') })).filter((x) => x.n), arr = L.filter((x) => x.v > ref + cerca)[0], abj = L.filter((x) => x.v < ref - cerca).slice(-1)[0];
+          L = it.gex && k ? [...it.gex.C.map((x, i) => ({ v: x.k * k, n: 'C' + (i + 1) })), ...it.gex.P.map((x, i) => ({ v: x.k * k, n: 'P' + (i + 1) })), ...(it.gex.hvl != null ? [{ v: it.gex.hvl * k, n: 'HVL' }] : [])].sort((p, q) => p.v - q.v) : ((Es && Es.N) || []).map((x) => ({ v: x.v, n: x.n.split(' + ').filter((t) => t !== 'max pain').join(' + ') })).filter((x) => x.n), arr = L.filter((x) => x.v > ref + cerca)[0], abj = L.filter((x) => x.v < ref - cerca).slice(-1)[0];
         const ivp = ((dd.pch || {})[sym] || {}).ivp; if (ivp != null && ivp >= 0.75) G.push(nm);
         const fila = (l, v, cl) => `<tr><th>${l}</th><td class="${cl || ''}">${v}</td></tr>`;
         cols += `<section class="v-a v-${st}"><header><h3>${nm}</h3><span class="v-px">${f(px, d)}</span></header><div class="v-e">${tit}</div>${mot ? `<div class="v-m">${mot}</div>` : ''}<p>${txt}</p><table>`
@@ -909,7 +921,7 @@
   };
   const ESTILO = {
     // Semana: línea continua · Estructural: punteada
-    flip: { col: '#ffd166' }, muro: { col: '#2fbf71' }, iman: { col: '#ff5c6c' }, mp: { col: '#9aa7b4' }, flujo: { col: '#00b0ff' },
+    flip: { col: '#ffd166' }, muro: { col: '#2fbf71' }, iman: { col: '#ff5c6c' }, mp: { col: '#9aa7b4' }, flujo: { col: '#00b0ff' }, gexC: { col: '#2fbf71' }, gexP: { col: '#ff5c6c' }, hvl: { col: '#29c5f6' },
   };
   const idsGuardados = () => { try { return JSON.parse(localStorage.getItem('ng_ids') || '{}'); } catch (e) { return {}; } };
   const guardarIds = (o) => { try { localStorage.setItem('ng_ids', JSON.stringify(o)); } catch (e) {} };
@@ -930,16 +942,13 @@
     if (!esEtf && !it.ratio) return;
     const k = esEtf ? 1 : it.ratio, dec = esEtf ? 2 : it.dec;
     const lineas = [];
-    const add = (strike, tipo, mapaN, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, mapaN, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
-    const s = it.semana || {}, e = it.estructural || {};
-    add(s.flip, 'flip', 'S', 'S·FLIP'); add(s.muro, 'muro', 'S', 'S·MURO'); add(s.iman, 'iman', 'S', 'S·IMÁN*');
-    add(e.flip, 'flip', 'E', 'E·FLIP'); add(e.muro, 'muro', 'E', 'E·MURO'); add(e.iman, 'iman', 'E', 'E·IMÁN*');
-    if (it.maxPain.cercano) add(it.maxPain.cercano.strike, 'mp', 'S', 'MAXPAIN ' + it.maxPain.cercano.venc.slice(5));
-    if (it.maxPain.mensual) add(it.maxPain.mensual.strike, 'mp', 'E', 'MAXPAIN ' + it.maxPain.mensual.venc.slice(5));
-    // v4.6: FLUJO GRANDE de opciones de hoy (o del último día con mercado abierto) · ▲ compran calls/venden puts · ▼ compran puts/venden calls · ◆ mixto
-    { const fz = (gmGet('ng_flujoS', {}) || {})[etf];
-      const M = (v) => v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M' : '$' + Math.round(v / 1e3) + 'k';
-      if (fz && fz.L) for (const z of fz.L) add(z.k, 'flujo', 'S', 'F·FLUJO ' + fz.dia.slice(5) + ' ' + M(z.t) + ' ' + (z.a > 1.5 * z.b ? '▲' : z.b > 1.5 * z.a ? '▼' : '◆')); }
+    const add = (strike, tipo, rango, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, rango, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
+    // v5.3: solo niveles GEX del primer vencimiento: C1–C5, P1–P5 y HVL. Σ = también está entre los 3 más fuertes de los próximos 4 vencimientos.
+    const G = it.gex;
+    if (G) { const tag = `${G.dte}DTE ${G.venc.slice(5).replace('-', '/')}`;
+      G.C.forEach((x, i) => add(x.k, 'gexC', i + 1, `C${i + 1}${x.sem ? 'Σ' : ''} ${tag}`));
+      G.P.forEach((x, i) => add(x.k, 'gexP', i + 1, `P${i + 1}${x.sem ? 'Σ' : ''} ${tag}`));
+      if (G.hvl != null) add(G.hvl, 'hvl', 1, `HVL ${tag}`); }
     // v4.3: botón NIVELES ON/OFF → apagado = se borran FLIP/MURO/IMÁN/MAXPAIN y no se vuelven a dibujar (el precio en vivo sigue)
     const on = gmGet('ng_lineas', true); if (!on) lineas.length = 0;
     const firma = (on ? 'on|' : 'off|') + sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
@@ -948,7 +957,7 @@
     // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
     // porque TradingView cambia el id interno al recargar el gráfico guardado y así quedaban líneas viejas duplicadas.
     const ids = idsGuardados();
-    const MIA = /^(S·|E·|F·|MAXPAIN )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
+    const MIA = /^(S·|E·|F·|MAXPAIN |C\d|P\d|HVL )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
     for (const x of ch.getAllShapes() || []) {
       if (x.name !== 'horizontal_line') continue;
       let txt = '';
@@ -961,9 +970,9 @@
         const id = await ch.createShape({ price: l.p }, {
           shape: 'horizontal_line', lock: true, disableSelection: false, disableSave: false, text: l.texto,
           overrides: {
-            linecolor: ESTILO[l.tipo].col, linewidth: l.tipo === 'flujo' ? 3 : l.mapaN === 'S' ? 2 : 1, linestyle: l.tipo === 'flujo' ? 1 : l.mapaN === 'S' ? 0 : 2,
+            linecolor: ESTILO[l.tipo].col, linewidth: l.rango === 1 ? 2 : 1, linestyle: l.rango === 1 ? 0 : 2,
             showLabel: true, text: l.texto, textcolor: ESTILO[l.tipo].col, fontsize: 11,
-            horzLabelsAlign: l.mapaN === 'S' ? 'right' : 'left', vertLabelsAlign: 'top',
+            horzLabelsAlign: 'right', vertLabelsAlign: 'top',
           },
         });
         if (id != null) nuevos.push(id);
