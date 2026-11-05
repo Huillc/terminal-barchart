@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      4.9
+// @version      5.0
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -691,6 +691,49 @@
       h += fila(8, 'Riesgo antes de entrar', ck('m8', 'Stop donde se anula la idea · riesgo 0,5 % ' + (cap ? `(= ${f(cap * 0.005, 0)} USD)` : '(pon tu capital abajo)') + ' · objetivo ≥ 1,5R en la próxima liquidez', 'si no hay 1,5R hasta la próxima liquidez, no hay operación'));
       return h + '</div>';
     }
+    // ── v5.0: VISTA RESUMEN — un semáforo por activo. Las reglas son las mismas de la rutina; el detalle completo sigue detrás de "Ver detalle". ──
+    function vistaHTML(data, dd) {
+      const tm = ny().min, ab = mercadoAbierto(), conf = ab && tm >= cierreHoy() - 15, comp = cierreHoy() === 960, Pn = panico(dd), tl = gmGet('ng_tvlive', null), P = proximoDato();
+      const hFin = limaDeNY(cierreHoy() - 1), E = [], A = [], G = []; let cols = '';
+      for (const sym of Object.keys(ACTIVOS)) {
+        const a = ACTIVOS[sym], nm = a.nombre, it = data.items[sym];
+        if (!it || it.error) { cols += `<section class="v-a v-off"><header><h3>${nm}</h3></header><div class="v-e">Sin datos</div><p>${it ? it.error : 'Esperando a Barchart.'}</p></section>`; continue; }
+        const d = it.dec, k = it.ratio, c = caida(dd, sym), n = (v) => (k && v != null ? f(v * k, d) : '—');
+        const px = (tl && Date.now() - tl.t < 60e3 && tl.px && tl.px[sym]) || (dd.px && dd.px[a.cfd]) || it.cfd;
+        let st = 'esp', tit = 'Espera', mot = '', txt = '';
+        if (c.estado) txt = 'Faltan datos diarios.';
+        else {
+          const m3 = sym !== 'GLD' && !c.ok.tend;
+          if (c.señal && conf) { st = 'ent'; tit = 'Compra ahora'; mot = 'Caída rápida'; txt = `Objetivo <b>${n(c.obj)}</b><br>Stop <b>${n(c.stop)}</b><br>Entra antes de las ${hFin}`; }
+          else if (sym === 'QQQ' && Pn.señal && conf) { st = 'ent'; tit = 'Compra ahora'; mot = 'Rebote de pánico'; txt = `Sale al primer cierre sobre <b>${n(Pn.prevHigh)}</b> o a los 5 días<br>Entra antes de las ${hFin}`; }
+          else if (m3 && ab && comp && tm >= 750 && tm <= 870) { st = 'ent'; tit = 'Compra ahora'; mot = 'Tarde bajista'; txt = `Sin objetivo<br>Cierra a las ${hFin}`; }
+          else if (c.señal && !cerrado()) { st = 'ate'; tit = 'Todavía no'; mot = 'Caída rápida formándose'; txt = `Se confirma desde las ${limaDeNY(cierreHoy() - 15)}.`; }
+          else if (sym === 'QQQ' && Pn.señal && ab) { st = 'ate'; tit = 'Todavía no'; mot = 'Rebote de pánico formándose'; txt = `Se confirma desde las ${limaDeNY(cierreHoy() - 15)}.`; }
+          else if (m3 && ab && comp && tm < 750) { st = 'ate'; tit = 'Hoy a las ' + limaDeNY(750); mot = 'Tarde bajista'; txt = `Compra hasta las ${limaDeNY(870)} y cierra a las ${hFin}.`; }
+          else if (m3) txt = 'Bajo su media de 200: solo tarde bajista, en sesión completa.';
+          else if (!c.ok.tend) txt = 'Bajo su media de 200: sin operación probada.';
+          else if (c.gat > c.sma200) txt = `Compra solo si ${c.manana ? 'el próximo cierre' : 'hoy cierra'} en <b>${n(c.gat)}</b> o menos.`;
+          else txt = 'Caída rápida fuera de alcance por ahora.';
+        }
+        if (st === 'ent') E.push(nm); if (st === 'ate') A.push(nm);
+        const V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), Es = escenarios(sym, it, dd), L = (Es && Es.N) || [], ref = (px && it.cfd ? px : it.cfd), arr = L.filter((x) => x.v > ref)[0], abj = L.filter((x) => x.v < ref).slice(-1)[0];
+        const ivp = ((dd.pch || {})[sym] || {}).ivp; if (ivp != null && ivp >= 0.75) G.push(nm);
+        const fila = (l, v, cl) => `<tr><th>${l}</th><td class="${cl || ''}">${v}</td></tr>`;
+        cols += `<section class="v-a v-${st}"><header><h3>${nm}</h3><span class="v-px">${f(px, d)}</span></header><div class="v-e">${tit}</div>${mot ? `<div class="v-m">${mot}</div>` : ''}<p>${txt}</p><table>`
+          + fila('Tendencia', c.estado ? '—' : (c.ok.tend ? 'Sobre media 200' : 'Bajo media 200'), c.estado ? '' : (c.ok.tend ? 'v-u' : 'v-d'))
+          + fila('VWAP', V ? `${V.lado > 0 ? 'Sobre' : 'Bajo'} ${Math.abs(V.pct).toFixed(2)} %` : '—', V ? (V.lado > 0 ? 'v-u' : 'v-d') : '')
+          + fila('Tipo de día', Es && Es.modo ? (Es.modo === 'AMPLIO' ? 'Amplio' : 'Frenado') : '—')
+          + fila('Arriba', arr ? `${f(arr.v, d)} <small>${arr.n}</small>` : '—')
+          + fila('Abajo', abj ? `${f(abj.v, d)} <small>${abj.n}</small>` : '—')
+          + '</table></section>';
+      }
+      const claseB = E.length ? 'ent' : A.length ? 'ate' : 'esp';
+      const tituloB = E.length ? `Entrada ahora en ${E.join(", ")}` : A.length ? `Atento a ${A.join(", ")}: todavía no entres` : (ab ? 'Sin entradas ahora' : 'Mercado cerrado: sin entradas');
+      const extra = [];
+      if (G.length) extra.push(`<span class="v-g">⚡ Posible día grande en ${G.join(', ')}. No indica dirección.</span>`);
+      if (P && !P.fin) extra.push(`<span class="${P.imp >= 3 ? 'v-g' : ''}">Próximo dato: ${P.h} ${P.n}</span>`);
+      return `<div class="v-b v-${claseB}"><strong>${tituloB}</strong>${extra.join('')}</div><div class="v-g3">${cols}</div>`;
+    }
     function pintar(estado) {
       const abierto = gmGet('ng_abierto', true), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null), F = fase();
       // v3.4: plegado = botón chico abajo a la izquierda, para no tapar el menú de Barchart
@@ -729,8 +772,17 @@
         .tc small{font-size:9.5px;color:#8b9bb0;text-transform:uppercase;letter-spacing:.04em}.tc i{font-style:normal;font-size:10px;color:#9fb3c8}
         .fila2{display:flex;gap:4px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;margin:-2px 0 6px}
         .fo{padding:1px 6px;border-radius:5px;background:#0b1118;border:1px solid #1e2a36}.fo.fu b{color:#5dffa5}.fo.fd b{color:#ff8a96}.fo.fn b{color:#c9d6e3}
+        .v-b{display:flex;flex-wrap:wrap;gap:4px 18px;align-items:baseline;margin-top:8px;padding:10px 14px;border-radius:4px;background:#1a2a3a;color:#c6d3e0}
+        .v-b strong{font-size:20px;line-height:1.2;color:#fff;margin-right:auto}.v-b.v-ent{background:#0f8f52}.v-b.v-ate{background:#a86a00}.v-b span{font-size:13px}.v-b .v-g{color:#ffd27a;font-weight:600}.v-b.v-ent span,.v-b.v-ate span{color:#fff}
+        .v-g3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1px;margin-top:8px;background:#2b3b4e;border:1px solid #2b3b4e}
+        .v-a{background:#0d1824;padding:10px 14px 12px;border-top:6px solid #4a5d70}.v-a.v-ent{border-top-color:#2ed47a;background:#0c2a1b}.v-a.v-ate{border-top-color:#ffb020}.v-a.v-off{border-top-color:#ff5468}
+        .v-a header{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.v-a h3{margin:0;font-size:14px;font-weight:600;color:#9fb3c8}.v-px{font-size:16px;font-weight:600;color:#fff;font-variant-numeric:tabular-nums}
+        .v-e{font-size:28px;line-height:1.15;font-weight:800;color:#8fa3b8;margin-top:6px}.v-ent .v-e{color:#2ed47a}.v-ate .v-e{color:#ffb020}.v-off .v-e{color:#ff8a96}
+        .v-m{font-size:13px;font-weight:600;color:#e8eef4;margin-top:2px}.v-a p{margin:6px 0 8px;font-size:13px;line-height:1.45;color:#c6d3e0;min-height:38px}.v-a p b{color:#fff;font-variant-numeric:tabular-nums}
+        .v-a table{width:100%;border-collapse:collapse;font-size:12.5px}.v-a th{text-align:left;font-weight:400;color:#7f93a8;padding:3px 0;border-top:1px solid #1e2a36;width:40%}.v-a td{text-align:right;color:#e8eef4;padding:3px 0;border-top:1px solid #1e2a36;font-variant-numeric:tabular-nums}.v-a td small{color:#7f93a8;font-size:11px}.v-u{color:#5dffa5!important}.v-d{color:#ff8a96!important}
         input{width:110px;background:#0b1118;color:#fff;border:1px solid #2b3b4e;border-radius:5px;padding:2px 5px;font:inherit;font-size:12px}
-      </style><div class="b"><div class="top"><b>📋 PLAN DEL DÍA</b><span class="fs">${F.n}</span><span class="m">${F.d}</span>${(() => { const P = proximoDato(); return P && !P.fin ? `<span class="ft ${P.imp >= 3 ? 'fd' : P.faltan <= 15 ? 'fa' : 'fn'}"><small>Próximo dato</small>${P.h} ${P.n}<i>en ${P.faltan} min${P.imp >= 3 ? ' · ALTO IMPACTO: sin posición' : ''}</i></span>` : ''; })()}<span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span>${(() => { const o = gmGet('ng_oanda', null); return `<button id="oa" title="Conectar precio en vivo de OANDA">${o ? (dd && dd.px && dd.px._error ? '⚠ OANDA' : '● OANDA') : 'OANDA'}</button>`; })()}<button id="exp" title="Descargar el registro de datos">📥 registro (${gmGet('ng_reg_dias', []).length} d)</button><button id="ac">↻</button><button id="tg">${abierto ? '▴ plegar' : '▾ plan'}</button></div>`;
+      </style><div class="b"><div class="top"><b>Plan del día</b><span class="fs" title="${F.d}">${F.n}</span><span style="flex:1"></span><span class="m">${dd ? 'datos ' + dd.hora : ''}${data ? ' · gamma ' + data.hora : ''} ${estado || ''}</span>${(() => { const o = gmGet('ng_oanda', null); return `<button id="oa" title="Conectar precio en vivo de OANDA"${gmGet('ng_detalle', false) ? '' : ' style="display:none"'}>${o ? (dd && dd.px && dd.px._error ? '⚠ OANDA' : '● OANDA') : 'OANDA'}</button>`; })()}<button id="exp" title="Descargar el registro de datos"${gmGet('ng_detalle', false) ? '' : ' style="display:none"'}>📥 registro (${gmGet('ng_reg_dias', []).length} d)</button><button id="det">${gmGet('ng_detalle', false) ? 'Ocultar detalle' : 'Ver detalle'}</button><button id="ac" title="Actualizar">↻</button><button id="tg">Plegar</button></div>`;
+      const h0 = h;
       if (abierto && data && dd) {
         const cap = gmGet('ng_capital', null);
         h += '<div class="g">';
@@ -767,6 +819,9 @@
         const D = evaluarDiario(dd), hechos = D.filter((x) => x.r != null);
         const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' || tipo === 'caida' || tipo === 'tarde' ? ' %' : ' R'}` : 'aún sin resultados'; };
         h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · caída rápida: ${txt('caida')} · tarde bajista: ${txt('tarde')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
+        const full = h.slice(h0.length); let v = '';
+        try { v = vistaHTML(data, dd); } catch (e) { v = `<div class="v-b v-esp"><strong>No se pudo armar el resumen.</strong><span>Abre Ver detalle.</span></div>`; }
+        h = h0 + v + (gmGet('ng_detalle', false) ? full : '');
       }
       h += '</div>';
       const bOld = sh.querySelector('.b'), scr = bOld ? bOld.scrollTop : 0;   // v4.2: conservar el desplazamiento al refrescar
@@ -774,6 +829,7 @@
       { const bN = sh.querySelector('.b'); if (bN && scr) bN.scrollTop = scr; }
       sh.getElementById('tg').onclick = () => { gmSet('ng_abierto', !gmGet('ng_abierto', true)); pintar(); };
       sh.getElementById('ac').onclick = () => { ciclo(true); cicloDia(true); };
+      { const db = sh.getElementById('det'); if (db) db.onclick = () => { gmSet('ng_detalle', !gmGet('ng_detalle', false)); pintar(); }; }
       { const eb = sh.getElementById('exp'); if (eb) eb.onclick = exportarRegistro; }
       { const b = sh.getElementById('oa'); if (b) b.onclick = () => {
         const o = gmGet('ng_oanda', null);
