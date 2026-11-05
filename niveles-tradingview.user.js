@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.3
+// @version      5.4
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -29,7 +29,7 @@
     GLD: { cfd: 'OANDA:XAUUSD',    idx: '^XAUUSD', nombre: 'ORO',    dec: 1 },
   };
   const PAUSA_MS = 2000;            // regla: nunca más de 1 pedido cada 1–2 s a Barchart
-  const VER_DATOS = 35; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
+  const VER_DATOS = 36; // v3.3: si los datos los calculó una versión vieja (otra pestaña sin recargar), se recalculan
   const CICLO_ABIERTO_MS = 5 * 60e3; // recalcular cada 5 min con mercado abierto
   const CICLO_CERRADO_MS = 30 * 60e3;
   const DIAS_ESTR = 45;              // mapa estructural: vencimientos de 1 a 45 días
@@ -95,16 +95,17 @@
     };
   }
 
-  // v5.3: niveles GEX del primer vencimiento (0DTE si existe; si no, el siguiente). Solo referencia visual: los muros no probaron ser freno.
-  function gexNiveles(filas, S, hoy, venc, semana) {
-    const expo = (L) => { const C = {}, P = {}; for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0)) continue; if (Math.abs(x.strikePrice / S - 1) > 0.1) continue; const g = x.gamma * x.openInterest * 100 * S * S * 0.01, d = x.optionType === 'Call' ? C : P; d[x.strikePrice] = (d[x.strikePrice] || 0) + g; } return { C, P }; };
-    const top = (o, n) => Object.entries(o).map(([k, v]) => [+k, v]).sort((a, b) => b[1] - a[1]).slice(0, n);
-    const f = filas.filter((x) => x.expirationDate === venc), a = expo(f), b = expo(semana), m = mapa(f, S, hoy);
-    const fuerteC = new Set(top(b.C, 3).map((x) => x[0])), fuerteP = new Set(top(b.P, 3).map((x) => x[0]));
-    return { venc, dte: dte(venc, hoy), hvl: m ? m.flip : null,
-      C: top(a.C, 5).map((x) => ({ k: x[0], g: Math.round(x[1]), sem: fuerteC.has(x[0]) })),
-      P: top(a.P, 5).map((x) => ({ k: x[0], g: Math.round(x[1]), sem: fuerteP.has(x[0]) })) };
+  // v5.4: perfil GEX neto propio. Por strike: gamma × interés abierto × 100 × S² × 1 %, calls en positivo y puts en negativo.
+  // C1–C3 = mayor neto positivo · P1–P3 = mayor neto negativo · HVL = donde la gamma total cambia de signo. Dos modos: primer vencimiento o acumulado.
+  function gexPerfil(filas, S, hoy, venc, semana) {
+    const calc = (L) => { const n = {};
+      for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0) || Math.abs(x.strikePrice / S - 1) > 0.1) continue; n[x.strikePrice] = (n[x.strikePrice] || 0) + x.gamma * x.openInterest * 100 * S * S * 0.01 * (x.optionType === 'Call' ? 1 : -1); }
+      const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy);
+      return { hvl: m ? m.flip : null, C: A.filter((x) => x.g > 0).sort((p, q) => q.g - p.g).slice(0, 3), P: A.filter((x) => x.g < 0).sort((p, q) => p.g - q.g).slice(0, 3), B: A.slice().sort((p, q) => Math.abs(q.g) - Math.abs(p.g)).slice(0, 20) }; };
+    return { venc, dte: dte(venc, hoy), primero: calc(filas.filter((x) => x.expirationDate === venc)), acum: calc(semana) };
   }
+  const gexModo = () => gmGet('ng_gexmodo', 'primero');
+  const gexDe = (it) => (it && it.gex ? it.gex[gexModo()] : null);
 
   // Max pain de UN vencimiento (como lo publica Barchart, no sumando varios)
   function maxPain(filas, S) {
@@ -262,7 +263,7 @@
             cfd: c, fuenteCfd: cReal ? ((cfd._src && cfd._src[a.cfd]) || 'CFD OANDA') : (cIdx ? 'índice ' + a.idx + ' (aprox.)' : null),
             ratio: c ? c / S : null,
             opc,
-            gex: vCerca ? gexNiveles(ch, S, hoy, vCerca, ch.filter((x) => semV.includes(x.expirationDate))) : null,
+            gex: vCerca ? gexPerfil(ch, S, hoy, vCerca, ch.filter((x) => semV.includes(x.expirationDate))) : null,
             semana: mapa(ch.filter((x) => semV.includes(x.expirationDate)), S, hoy),
             estructural: mapa(ch.filter((x) => estV.includes(x.expirationDate)), S, hoy),
             maxPain: {
@@ -576,11 +577,23 @@
       gmSet(k, L);
       const dias = gmGet('ng_reg_dias', []); if (!dias.includes(t.dia)) { dias.push(t.dia); gmSet('ng_reg_dias', dias); }
     }
+    // v5.4: foto de niveles a las 09:45 y máximo/mínimo del día del ETF, para medir si las barras grandes atraen el precio. No genera señales.
+    function gexFoto() {
+      const t = ny(), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null); if (!data || !dd || !dd.Q) return;
+      const F = gmGet('ng_gexfotos', {}); let cambia = false;
+      if (mercadoAbierto() && t.min >= 585 && !F[t.dia]) { const o = {};
+        for (const sym of Object.keys(ACTIVOS)) { const it = data.items[sym], q = dd.Q[sym]; if (!it || !it.gex || !q) continue; o[sym] = { px: q.lastPrice, h: q.highPrice, l: q.lowPrice, venc: it.gex.venc, pr: { C: it.gex.primero.C, P: it.gex.primero.P, hvl: it.gex.primero.hvl }, ac: { C: it.gex.acum.C, P: it.gex.acum.P, hvl: it.gex.acum.hvl } }; }
+        if (Object.keys(o).length) { F[t.dia] = o; cambia = true; } }
+      if (F[t.dia] && !esFeriado() && !/Sat|Sun/.test(t.sem)) for (const sym of Object.keys(F[t.dia])) { const q = dd.Q[sym]; if (q && q.highPrice > 0 && (q.highPrice !== F[t.dia][sym].h || q.lowPrice !== F[t.dia][sym].l)) { F[t.dia][sym].h = q.highPrice; F[t.dia][sym].l = q.lowPrice; cambia = true; } }
+      if (cambia) { const k = Object.keys(F).sort(); while (k.length > 400) delete F[k.shift()]; gmSet('ng_gexfotos', F); }
+    }
     function exportarRegistro() {
       const dias = gmGet('ng_reg_dias', []), filas = [REG_COLS.join(',')];
       for (const d of dias) for (const x of gmGet('ng_reg_' + d, [])) filas.push(x.map((v) => (v == null ? '' : v)).join(','));
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([filas.join('\n')], { type: 'text/csv' }));
       a.download = 'registro-plan-del-dia-' + hoyNY() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+      const FO = gmGet('ng_gexfotos', {});
+      if (Object.keys(FO).length) { const c = document.createElement('a'); c.href = URL.createObjectURL(new Blob([JSON.stringify(FO)], { type: 'application/json' })); c.download = 'gex-fotos-' + hoyNY() + '.json'; document.body.appendChild(c); c.click(); c.remove(); }
       const AR = gmGet('ng_arranques', []);
       if (AR.length) { const b = document.createElement('a'); b.href = URL.createObjectURL(new Blob([['dia', 'activo', 'dir', 'ref', 'precio', 'atrs', 'hora'].join(',') + '\n' + AR.map((x) => [x.dia, x.nm, x.dir, x.ref, x.px, x.atrs, x.hora].join(',')).join('\n')], { type: 'text/csv' })); b.download = 'arranques-' + hoyNY() + '.csv'; document.body.appendChild(b); b.click(); b.remove(); }
     }
@@ -752,13 +765,14 @@
         }
         if (st === 'ent') E.push(nm); if (st === 'ate') A.push(nm);
         const V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), Es = escenarios(sym, it, dd), ref = px || it.cfd, cerca = c.atr && k ? c.atr * k * 0.15 : 0,   // v5.1: sin max pain (probado, no funciona) ni niveles pegados al precio
-          L = it.gex && k ? [...it.gex.C.map((x, i) => ({ v: x.k * k, n: 'C' + (i + 1) })), ...it.gex.P.map((x, i) => ({ v: x.k * k, n: 'P' + (i + 1) })), ...(it.gex.hvl != null ? [{ v: it.gex.hvl * k, n: 'HVL' }] : [])].sort((p, q) => p.v - q.v) : ((Es && Es.N) || []).map((x) => ({ v: x.v, n: x.n.split(' + ').filter((t) => t !== 'max pain').join(' + ') })).filter((x) => x.n), arr = L.filter((x) => x.v > ref + cerca)[0], abj = L.filter((x) => x.v < ref - cerca).slice(-1)[0];
+          gx = gexDe(it), L = gx && k ? [...gx.C.map((x, i) => ({ v: x.k * k, n: 'C' + (i + 1) })), ...gx.P.map((x, i) => ({ v: x.k * k, n: 'P' + (i + 1) })), ...(gx.hvl != null ? [{ v: gx.hvl * k, n: 'HVL' }] : [])].sort((p, q) => p.v - q.v) : ((Es && Es.N) || []).map((x) => ({ v: x.v, n: x.n.split(' + ').filter((t) => t !== 'max pain').join(' + ') })).filter((x) => x.n), arr = L.filter((x) => x.v > ref + cerca)[0], abj = L.filter((x) => x.v < ref - cerca).slice(-1)[0];
         const ivp = ((dd.pch || {})[sym] || {}).ivp; if (ivp != null && ivp >= 0.75) G.push(nm);
         const fila = (l, v, cl) => `<tr><th>${l}</th><td class="${cl || ''}">${v}</td></tr>`;
         cols += `<section class="v-a v-${st}"><header><h3>${nm}</h3><span class="v-px">${f(px, d)}</span></header><div class="v-e">${tit}</div>${mot ? `<div class="v-m">${mot}</div>` : ''}<p>${txt}</p><table>`
           + fila('Tendencia', c.estado ? '—' : (c.ok.tend ? 'Sobre media 200' : 'Bajo media 200'), c.estado ? '' : (c.ok.tend ? 'v-u' : 'v-d'))
           + fila('VWAP', V && ab ? `${V.lado > 0 ? 'Sobre' : 'Bajo'} ${Math.abs(V.pct).toFixed(2)} %` : '—', V && ab ? (V.lado > 0 ? 'v-u' : 'v-d') : '')
           + fila('Tipo de día', Es && Es.modo ? (Es.modo === 'AMPLIO' ? 'Amplio' : 'Frenado') : '—')
+          + fila('HVL', gx && gx.hvl != null && k ? `${ref > gx.hvl * k ? 'Sobre' : 'Bajo'} ${f(gx.hvl * k, d)}` : '—', gx && gx.hvl != null && k ? (ref > gx.hvl * k ? 'v-u' : 'v-d') : '')
           + fila('Arriba', arr ? `${f(arr.v, d)} <small>${arr.n}</small>` : '—')
           + fila('Abajo', abj ? `${f(abj.v, d)} <small>${abj.n}</small>` : '—')
           + '</table></section>';
@@ -896,7 +910,7 @@
       const ttl = activo ? 60e3 : 15 * 60e3, lock = gmGet('ng_dlock', 0);
       if (!forzar && ((dd && Date.now() - dd.t < ttl) || Date.now() - lock < 50e3)) { pintar(); return; }
       corriendoDia = true; gmSet('ng_dlock', Date.now());
-      try { await datosDia(); try { registrar(); } catch (e) {} } catch (e) {} finally { corriendoDia = false; gmSet('ng_dlock', 0); pintar(); }
+      try { await datosDia(); try { registrar(); gexFoto(); } catch (e) {} } catch (e) {} finally { corriendoDia = false; gmSet('ng_dlock', 0); pintar(); }
     }
     pintar();
     setTimeout(() => cicloDia(false), 3000);
@@ -943,23 +957,26 @@
     const k = esEtf ? 1 : it.ratio, dec = esEtf ? 2 : it.dec;
     const lineas = [];
     const add = (strike, tipo, rango, texto) => { if (strike != null && isFinite(strike)) lineas.push({ p: +(strike * k).toFixed(dec), tipo, rango, texto: `${texto} ${(strike * k).toFixed(dec)} (${etf} ${strike})` }); };
-    // v5.3: solo niveles GEX del primer vencimiento: C1–C5, P1–P5 y HVL. Σ = también está entre los 3 más fuertes de los próximos 4 vencimientos.
-    const G = it.gex;
-    if (G) { const tag = `${G.dte}DTE ${G.venc.slice(5).replace('-', '/')}`;
-      G.C.forEach((x, i) => add(x.k, 'gexC', i + 1, `C${i + 1}${x.sem ? 'Σ' : ''} ${tag}`));
-      G.P.forEach((x, i) => add(x.k, 'gexP', i + 1, `P${i + 1}${x.sem ? 'Σ' : ''} ${tag}`));
-      if (G.hvl != null) add(G.hvl, 'hvl', 1, `HVL ${tag}`); }
+    // v5.4: C1–C3, P1–P3, HVL y perfil de barras del modo elegido (botón GEX)
+    const G = it.gex, gx = gexDe(it), barras = [];
+    if (G && gx) { const tag = gexModo() === 'acum' ? 'Σ4V' : `${G.dte}DTE ${G.venc.slice(5).replace('-', '/')}`;
+      gx.C.forEach((x, i) => add(x.k, 'gexC', i + 1, `C${i + 1} ${tag}`));
+      gx.P.forEach((x, i) => add(x.k, 'gexP', i + 1, `P${i + 1} ${tag}`));
+      if (gx.hvl != null) add(gx.hvl, 'hvl', 1, `HVL ${tag}`);
+      const mx = Math.max(1, ...gx.B.map((x) => Math.abs(x.g)));
+      for (const x of gx.B) barras.push({ p: +(x.k * k).toFixed(dec), f: Math.abs(x.g) / mx, pos: x.g > 0, k: x.k }); }
     // v4.3: botón NIVELES ON/OFF → apagado = se borran FLIP/MURO/IMÁN/MAXPAIN y no se vuelven a dibujar (el precio en vivo sigue)
-    const on = gmGet('ng_lineas', true); if (!on) lineas.length = 0;
-    const firma = (on ? 'on|' : 'off|') + sym + '|' + JSON.stringify(lineas.map((l) => l.texto));
+    const on = gmGet('ng_lineas', true); if (!on) { lineas.length = 0; barras.length = 0; }
+    let res = '60'; try { res = String(ch.resolution()); } catch (e) {}
+    const firma = (on ? 'on|' : 'off|') + sym + '|' + res + '|' + JSON.stringify(lineas.map((l) => l.texto)) + JSON.stringify(barras.map((x) => [x.p, +x.f.toFixed(2)]));
     if (!forzar && firma === ultimaFirma) return;
 
     // borrar SOLO las líneas de este script: v2.2 las reconoce por su TEXTO ("S·…", "E·…", "MAXPAIN …" con "(DIA|QQQ|GLD …)"),
     // porque TradingView cambia el id interno al recargar el gráfico guardado y así quedaban líneas viejas duplicadas.
     const ids = idsGuardados();
-    const MIA = /^(S·|E·|F·|MAXPAIN |C\d|P\d|HVL )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
+    const MIA = /^(S·|E·|F·|MAXPAIN |C\d|P\d|HVL |GX )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
     for (const x of ch.getAllShapes() || []) {
-      if (x.name !== 'horizontal_line') continue;
+      if (x.name !== 'horizontal_line' && x.name !== 'trend_line') continue;
       let txt = '';
       try { const o = ch.getShapeById(x.id); txt = (o.getProperties() || {}).text || ''; } catch (err) {}
       if (MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
@@ -978,6 +995,10 @@
         if (id != null) nuevos.push(id);
       } catch (err) {}
     }
+    // Perfil: barras a la derecha del precio; el largo es proporcional al GEX neto de cada strike
+    { const m = /^(\d+)$/.test(res) ? +res * 60 : res === 'D' || res === '1D' ? 86400 : res === 'W' || res === '1W' ? 604800 : 3600, t0 = Math.floor(Date.now() / 1000) + 3 * m;
+      for (const x of barras) { const col = x.pos ? '#2fbf71' : '#ff5c6c', txt = `GX ${x.k} (${etf} ${x.k})`;
+        try { const id = await ch.createMultipointShape([{ time: t0, price: x.p }, { time: t0 + Math.max(1, Math.round(x.f * 30)) * m, price: x.p }], { shape: 'trend_line', lock: true, text: txt, overrides: { linecolor: col, linewidth: x.f > 0.5 ? 4 : 2, showLabel: false, text: txt, extendLeft: false, extendRight: false } }); if (id != null) nuevos.push(id); } catch (err) {} } }
     ids[sym] = nuevos; guardarIds(ids);
     ultimaFirma = firma;
   }
@@ -998,6 +1019,17 @@
     try { GM_addValueChangeListener('ng_lineas', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
   }
   setTimeout(botonNiveles, 3000);
+  // v5.4: botón GEX → primer vencimiento o acumulado de los próximos 4
+  function botonGex() {
+    if (window.top !== window.self || document.getElementById('ng-gex-btn')) return;
+    const b = document.createElement('div'); b.id = 'ng-gex-btn';
+    const pint = () => { const ac = gexModo() === 'acum'; b.textContent = ac ? 'GEX: acumulado' : 'GEX: 1.er venc.'; b.title = 'Clic para cambiar entre el primer vencimiento y el acumulado de 4';
+      b.style.cssText = 'position:fixed;left:660px;bottom:58px;z-index:99999;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;font:600 11px system-ui,sans-serif;border:1px solid #29c5f6;background:rgba(11,21,32,.85);color:#29c5f6;'; };
+    b.onclick = () => { gmSet('ng_gexmodo', gexModo() === 'acum' ? 'primero' : 'acum'); pint(); dibujar(true); };
+    pint(); document.body.appendChild(b);
+    try { GM_addValueChangeListener('ng_gexmodo', (k, o, n, remoto) => { if (remoto) { pint(); dibujar(true); } }); } catch (e) {}
+  }
+  setTimeout(botonGex, 3000);
   // v4.4: botón PANEL ON/OFF → oculta o muestra el panel del indicador "Liquidez · Barridos" (cambia su opción "Panel resumen: tamaño")
   function liqPanel() {
     try {
