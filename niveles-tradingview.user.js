@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.1
+// @version      5.2
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -569,6 +569,8 @@
       for (const d of dias) for (const x of gmGet('ng_reg_' + d, [])) filas.push(x.map((v) => (v == null ? '' : v)).join(','));
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([filas.join('\n')], { type: 'text/csv' }));
       a.download = 'registro-plan-del-dia-' + hoyNY() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+      const AR = gmGet('ng_arranques', []);
+      if (AR.length) { const b = document.createElement('a'); b.href = URL.createObjectURL(new Blob([['dia', 'activo', 'dir', 'ref', 'precio', 'atrs', 'hora'].join(',') + '\n' + AR.map((x) => [x.dia, x.nm, x.dir, x.ref, x.px, x.atrs, x.hora].join(',')).join('\n')], { type: 'text/csv' })); b.download = 'arranques-' + hoyNY() + '.csv'; document.body.appendChild(b); b.click(); b.remove(); }
     }
 
     // ── 6) PANEL "PLAN DEL DÍA" ──
@@ -691,6 +693,27 @@
       h += fila(8, 'Riesgo antes de entrar', ck('m8', 'Stop donde se anula la idea · riesgo 0,5 % ' + (cap ? `(= ${f(cap * 0.005, 0)} USD)` : '(pon tu capital abajo)') + ' · objetivo ≥ 1,5R en la próxima liquidez', 'si no hay 1,5R hasta la próxima liquidez, no hay operación'));
       return h + '</div>';
     }
+    // ── v5.2: ARRANCÓ EL MOVIMIENTO (SIN PROBAR) — fuera de sesión vigila el CFD contra su precio del cierre. Solo avisa; no es señal de entrada. ──
+    const ARR_ATR = 0.75;
+    async function arranque() {
+      const t = ny(), dd = gmGet('ng_dia', null); if (mercadoAbierto() || !dd || !dd.Q) return;
+      const px = await precioCFD(); let ref = gmGet('ng_arr_ref', {}), L = gmGet('ng_arranques', []);
+      const trasCierre = !/Sat|Sun/.test(t.sem) && !esFeriado() && t.min >= cierreHoy();
+      for (const sym of Object.keys(ACTIVOS)) {
+        const a = ACTIVOS[sym], p = px && px[a.cfd]; if (!(p > 0)) continue;
+        if (trasCierre && (!ref[sym] || ref[sym].dia !== t.dia)) ref[sym] = { dia: t.dia, px: p };
+        const r = ref[sym]; if (!r) continue;
+        const c = caida(dd, sym); if (c.estado || !(c.atr > 0) || !(c.px > 0)) continue;
+        const atrs = (p / r.px - 1) / (c.atr / c.px);
+        if (Math.abs(atrs) >= ARR_ATR) {
+          const id = 'ar_' + sym + '_' + r.dia, dir = atrs > 0 ? 'sube' : 'baja';
+          if (!L.some((x) => x.id === id)) { L.push({ id, dia: r.dia, sym, nm: a.nombre, dir, ref: r.px, px: p, atrs: +atrs.toFixed(2), t: Date.now(), hora: horaLima() }); L = L.slice(-500); }
+          avisar(id, `⚡ ${a.nombre} ${dir} ${Math.abs(atrs).toFixed(1)} ATR fuera de sesión`, 'Sin probar: no es señal de entrada. Revisa tus niveles y espera tu regla.');
+        }
+      }
+      gmSet('ng_arr_ref', ref); gmSet('ng_arranques', L);
+    }
+
     // ── v5.0: VISTA RESUMEN — un semáforo por activo. Las reglas son las mismas de la rutina; el detalle completo sigue detrás de "Ver detalle". ──
     function vistaHTML(data, dd) {
       const tm = ny().min, ab = mercadoAbierto(), conf = ab && tm >= cierreHoy() - 15, comp = cierreHoy() === 960, Pn = panico(dd), tl = gmGet('ng_tvlive', null), P = proximoDato();
@@ -732,6 +755,7 @@
       const tituloB = E.length ? `Entrada ahora en ${E.join(", ")}` : A.length ? `Atento a ${A.join(", ")}: todavía no entres` : (ab ? 'Sin entradas ahora' : 'Mercado cerrado: sin entradas');
       const extra = [];
       if (G.length) extra.push(`<span class="v-g">⚡ Posible día grande en ${G.join(', ')}. No indica dirección.</span>`);
+      for (const x of gmGet('ng_arranques', []).filter((z) => Date.now() - z.t < 18 * 3600e3)) extra.push(`<span class="v-g">⚡ ${x.nm} ${x.dir} ${Math.abs(x.atrs).toFixed(1)} ATR fuera de sesión (${x.hora}). Sin probar: no entres solo por esto.</span>`);
       if (P && !P.fin) extra.push(`<span class="${P.imp >= 3 ? 'v-g' : ''}">Próximo dato: ${P.h} ${P.n}</span>`);
       return `<div class="v-b v-${claseB}"><strong>${tituloB}</strong>${extra.join('')}</div><div class="v-g3">${cols}</div>`;
     }
@@ -865,6 +889,8 @@
     pintar();
     setTimeout(() => cicloDia(false), 3000);
     setTimeout(() => ciclo(false), 9000);
+    setTimeout(() => { arranque().catch(() => {}); }, 12000);
+    setInterval(() => { arranque().catch(() => {}); }, 120e3);
     setInterval(() => { cicloDia(false); ciclo(false); }, 30e3);
     // v4.2: precio y VWAP en vivo (de tu TradingView) se repintan cada 5 s, sin F5
     setInterval(() => { try { if (gmGet('ng_abierto', true) && !document.hidden) pintar(); } catch (e) {} }, 5000);
