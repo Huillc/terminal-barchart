@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.4
+// @version      5.5
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -977,9 +977,10 @@
     const MIA = /^(S·|E·|F·|MAXPAIN |C\d|P\d|HVL |GX )[\s\S]*\((DIA|QQQ|GLD) [\d.]+\)$/;
     for (const x of ch.getAllShapes() || []) {
       if (x.name !== 'horizontal_line' && x.name !== 'trend_line') continue;
-      let txt = '';
-      try { const o = ch.getShapeById(x.id); txt = (o.getProperties() || {}).text || ''; } catch (err) {}
-      if (MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
+      let txt = '', colB = '';
+      try { const pr = ch.getShapeById(x.id).getProperties() || {}; txt = pr.text || ''; colB = String(pr.linecolor || '').toLowerCase(); } catch (err) {}
+      // v5.5: las barras no llevan texto; se reconocen por su color exclusivo
+      if ((x.name === 'trend_line' && (colB === '#2fbf72' || colB === '#ff5c6d')) || MIA.test(String(txt).trim()) || (ids[sym] || []).map(String).includes(String(x.id))) { try { ch.removeEntity(x.id); } catch (err) {} }
     }
     const nuevos = [];
     for (const l of lineas) {
@@ -997,8 +998,8 @@
     }
     // Perfil: barras a la derecha del precio; el largo es proporcional al GEX neto de cada strike
     { const m = /^(\d+)$/.test(res) ? +res * 60 : res === 'D' || res === '1D' ? 86400 : res === 'W' || res === '1W' ? 604800 : 3600, t0 = Math.floor(Date.now() / 1000) + 3 * m;
-      for (const x of barras) { const col = x.pos ? '#2fbf71' : '#ff5c6c', txt = `GX ${x.k} (${etf} ${x.k})`;
-        try { const id = await ch.createMultipointShape([{ time: t0, price: x.p }, { time: t0 + Math.max(1, Math.round(x.f * 30)) * m, price: x.p }], { shape: 'trend_line', lock: true, text: txt, overrides: { linecolor: col, linewidth: x.f > 0.5 ? 4 : 2, showLabel: false, text: txt, extendLeft: false, extendRight: false } }); if (id != null) nuevos.push(id); } catch (err) {} } }
+      for (const x of barras) { const col = x.pos ? '#2fbf72' : '#ff5c6d';
+        try { const id = await ch.createMultipointShape([{ time: t0, price: x.p }, { time: t0 + Math.max(3, Math.round(x.f * 40)) * m, price: x.p }], { shape: 'trend_line', lock: true, overrides: { linecolor: col, linewidth: x.f > 0.5 ? 4 : 2, showLabel: false, extendLeft: false, extendRight: false } }); if (id != null) nuevos.push(id); } catch (err) {} } }
     ids[sym] = nuevos; guardarIds(ids);
     ultimaFirma = firma;
   }
