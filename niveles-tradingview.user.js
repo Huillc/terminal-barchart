@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.0
+// @version      5.1
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -716,12 +716,13 @@
           else txt = 'Caída rápida fuera de alcance por ahora.';
         }
         if (st === 'ent') E.push(nm); if (st === 'ate') A.push(nm);
-        const V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), Es = escenarios(sym, it, dd), L = (Es && Es.N) || [], ref = (px && it.cfd ? px : it.cfd), arr = L.filter((x) => x.v > ref)[0], abj = L.filter((x) => x.v < ref).slice(-1)[0];
+        const V = vwapDe((dd.o5 || {})[sym] || (dd.b5 || {})[sym]), Es = escenarios(sym, it, dd), ref = px || it.cfd, cerca = c.atr && k ? c.atr * k * 0.15 : 0,   // v5.1: sin max pain (probado, no funciona) ni niveles pegados al precio
+          L = ((Es && Es.N) || []).map((x) => ({ v: x.v, n: x.n.split(' + ').filter((t) => t !== 'max pain').join(' + ') })).filter((x) => x.n), arr = L.filter((x) => x.v > ref + cerca)[0], abj = L.filter((x) => x.v < ref - cerca).slice(-1)[0];
         const ivp = ((dd.pch || {})[sym] || {}).ivp; if (ivp != null && ivp >= 0.75) G.push(nm);
         const fila = (l, v, cl) => `<tr><th>${l}</th><td class="${cl || ''}">${v}</td></tr>`;
         cols += `<section class="v-a v-${st}"><header><h3>${nm}</h3><span class="v-px">${f(px, d)}</span></header><div class="v-e">${tit}</div>${mot ? `<div class="v-m">${mot}</div>` : ''}<p>${txt}</p><table>`
           + fila('Tendencia', c.estado ? '—' : (c.ok.tend ? 'Sobre media 200' : 'Bajo media 200'), c.estado ? '' : (c.ok.tend ? 'v-u' : 'v-d'))
-          + fila('VWAP', V ? `${V.lado > 0 ? 'Sobre' : 'Bajo'} ${Math.abs(V.pct).toFixed(2)} %` : '—', V ? (V.lado > 0 ? 'v-u' : 'v-d') : '')
+          + fila('VWAP', V && ab ? `${V.lado > 0 ? 'Sobre' : 'Bajo'} ${Math.abs(V.pct).toFixed(2)} %` : '—', V && ab ? (V.lado > 0 ? 'v-u' : 'v-d') : '')
           + fila('Tipo de día', Es && Es.modo ? (Es.modo === 'AMPLIO' ? 'Amplio' : 'Frenado') : '—')
           + fila('Arriba', arr ? `${f(arr.v, d)} <small>${arr.n}</small>` : '—')
           + fila('Abajo', abj ? `${f(abj.v, d)} <small>${abj.n}</small>` : '—')
