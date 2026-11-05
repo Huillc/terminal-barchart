@@ -1,0 +1,168 @@
+//@version=6
+// Liquidez 4H: solo marca dónde hay stops acumulados. NO es señal de entrada.
+// Marca: máximos/mínimos iguales ($$$), giros sueltos ($) y líneas de tendencia con 3 toques ($$$).
+// Cada giro se confirma con velas cerradas de la temporalidad elegida, por eso aparece con retraso y no se repinta.
+// Cuando el precio cruza un nivel, queda como "barrido" y deja de extenderse.
+indicator("Liquidez 4H", overlay = true, max_lines_count = 200, max_labels_count = 200)
+
+grpA = "Detección"
+tf = input.timeframe("240", "Temporalidad", group = grpA)
+velas = input.int(5, "Velas a cada lado del giro", minval = 2, maxval = 20, group = grpA)
+tol = input.float(0.25, "Tolerancia de iguales y de línea (en ATR)", minval = 0.05, maxval = 1.0, step = 0.05, group = grpA)
+grpB = "Qué mostrar"
+verIguales = input.bool(true, "Máximos y mínimos iguales ($$$)", group = grpB)
+verSueltos = input.bool(true, "Giros sueltos ($)", group = grpB)
+verLineas = input.bool(true, "Líneas de tendencia ($$$)", group = grpB)
+verBarridos = input.bool(true, "Mantener niveles ya barridos", group = grpB)
+maxNiveles = input.int(12, "Máximo de niveles activos por lado", minval = 2, maxval = 30, group = grpB)
+grpC = "Colores"
+colAlta = input.color(#ff5c6c, "Liquidez arriba", group = grpC)
+colBaja = input.color(#2fbf71, "Liquidez abajo", group = grpC)
+colBar = input.color(#6f7a86, "Barrida", group = grpC)
+
+type Liq
+    float p1
+    int t1
+    float p2
+    int t2
+    int lado
+    int toques = 1
+    bool inclinada = false
+    line ln
+    label lb
+
+datos(int n) =>
+    float ph = ta.pivothigh(high, n, n)
+    float pl = ta.pivotlow(low, n, n)
+    float a = ta.atr(14)
+    [ph[1], pl[1], a[1], time[n + 1]]
+
+[ph, pl, atrTf, tPiv] = request.security(syminfo.tickerid, tf, datos(velas), lookahead = barmerge.lookahead_on)
+
+var array<Liq> arriba = array.new<Liq>()
+var array<Liq> abajo = array.new<Liq>()
+var array<float> hP = array.new<float>()
+var array<int> hT = array.new<int>()
+var array<float> lP = array.new<float>()
+var array<int> lT = array.new<int>()
+var int ultH = 0
+var int ultL = 0
+
+colorDe(int lado) =>
+    lado > 0 ? colAlta : colBaja
+
+// Precio del nivel en un momento dado (en una línea inclinada cambia con el tiempo)
+precioEn(Liq k, int t) =>
+    k.inclinada ? k.p1 + (k.p2 - k.p1) * (t - k.t1) / (k.t2 - k.t1) : k.p1
+
+pintar(Liq k) =>
+    color c = colorDe(k.lado)
+    bool fuerte = k.toques >= 2 or k.inclinada
+    if not na(k.ln)
+        line.delete(k.ln)
+    if not na(k.lb)
+        label.delete(k.lb)
+    bool visible = k.inclinada ? verLineas : fuerte ? verIguales : verSueltos
+    if visible
+        k.ln := line.new(k.t1, k.p1, k.t2, k.p2, xloc = xloc.bar_time, extend = extend.right, color = color.new(c, fuerte ? 15 : 60), width = fuerte ? 2 : 1, style = fuerte ? line.style_solid : line.style_dotted)
+        int tTxt = (k.t1 + k.t2) / 2
+        float pTxt = (k.p1 + k.p2) / 2
+        k.lb := label.new(tTxt, pTxt, fuerte ? "$$$" : "$", xloc = xloc.bar_time, style = k.lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small)
+
+recortar(array<Liq> z) =>
+    while z.size() > maxNiveles
+        Liq k = z.shift()
+        if not na(k.ln)
+            line.delete(k.ln)
+        if not na(k.lb)
+            label.delete(k.lb)
+
+// Un giro nuevo: si cae cerca de un nivel horizontal activo, lo refuerza; si no, crea uno.
+nuevoGiro(array<Liq> z, float p, int t, float a, int lado) =>
+    bool unido = false
+    if z.size() > 0
+        for k in z
+            if not k.inclinada and math.abs(k.p1 - p) <= tol * a
+                k.toques += 1
+                k.p1 := lado > 0 ? math.max(k.p1, p) : math.min(k.p1, p)
+                k.p2 := k.p1
+                k.t2 := t
+                pintar(k)
+                unido := true
+                break
+    if not unido
+        Liq n = Liq.new(p, t, p, t, lado)
+        pintar(n)
+        z.push(n)
+        recortar(z)
+
+// Línea de tendencia: 3 giros seguidos alineados (máximos cada vez más bajos o mínimos cada vez más altos)
+probarLinea(array<Liq> z, array<float> P, array<int> T, float a, int lado) =>
+    int m = P.size()
+    if m >= 3
+        float a1 = P.get(m - 3)
+        float a2 = P.get(m - 2)
+        float a3 = P.get(m - 1)
+        int t1 = T.get(m - 3)
+        int t2 = T.get(m - 2)
+        int t3 = T.get(m - 1)
+        bool orden = lado > 0 ? a1 > a2 and a2 > a3 : a1 < a2 and a2 < a3
+        if orden and t3 > t1
+            float medio = a1 + (a3 - a1) * (t2 - t1) / (t3 - t1)
+            if math.abs(a2 - medio) <= tol * a
+                Liq n = Liq.new(a1, t1, a3, t3, lado, 3, true)
+                pintar(n)
+                z.push(n)
+                recortar(z)
+
+guardarGiro(array<float> P, array<int> T, float p, int t) =>
+    P.push(p)
+    T.push(t)
+    if P.size() > 6
+        P.shift()
+        T.shift()
+
+// Barrido: una mecha cruza el nivel
+revisar(array<Liq> z, int lado) =>
+    int cuenta = 0
+    if z.size() > 0
+        for i = z.size() - 1 to 0
+            Liq k = z.get(i)
+            float p = precioEn(k, time)
+            bool barrido = lado > 0 ? high > p : low < p
+            if barrido and time > k.t2
+                cuenta += 1
+                if not na(k.ln) and verBarridos
+                    line.set_x2(k.ln, time)
+                    line.set_y2(k.ln, p)
+                    line.set_extend(k.ln, extend.none)
+                    line.set_color(k.ln, color.new(colBar, 40))
+                    line.set_style(k.ln, line.style_dashed)
+                    line.set_width(k.ln, 1)
+                    if not na(k.lb)
+                        label.set_textcolor(k.lb, colBar)
+                else
+                    if not na(k.ln)
+                        line.delete(k.ln)
+                    if not na(k.lb)
+                        label.delete(k.lb)
+                z.remove(i)
+    cuenta
+
+if not na(atrTf)
+    if not na(ph) and tPiv != ultH
+        ultH := tPiv
+        nuevoGiro(arriba, ph, tPiv, atrTf, 1)
+        guardarGiro(hP, hT, ph, tPiv)
+        probarLinea(arriba, hP, hT, atrTf, 1)
+    if not na(pl) and tPiv != ultL
+        ultL := tPiv
+        nuevoGiro(abajo, pl, tPiv, atrTf, -1)
+        guardarGiro(lP, lT, pl, tPiv)
+        probarLinea(abajo, lP, lT, atrTf, -1)
+
+int barrArriba = revisar(arriba, 1)
+int barrAbajo = revisar(abajo, -1)
+
+alertcondition(barrArriba > 0, "Barrida liquidez arriba", "Liquidez barrida arriba en {{ticker}}")
+alertcondition(barrAbajo > 0, "Barrida liquidez abajo", "Liquidez barrida abajo en {{ticker}}")
