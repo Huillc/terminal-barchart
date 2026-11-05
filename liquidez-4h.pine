@@ -2,7 +2,7 @@
 // Liquidez 4H: solo marca dónde hay stops acumulados. NO es señal de entrada.
 // Marca: máximos/mínimos iguales ($$$), giros sueltos ($) y líneas de tendencia con 3 toques ($$$).
 // Cada giro se confirma con velas cerradas de la temporalidad elegida, por eso aparece con retraso y no se repinta.
-// Cuando el precio cruza un nivel, queda como "barrido" y deja de extenderse.
+// Líneas fijas de punto a punto: nacen en el giro y terminan en la vela que las barre, o en la vela actual si siguen activas.
 indicator("Liquidez 4H", overlay = true, max_lines_count = 200, max_labels_count = 200)
 
 grpA = "Detección"
@@ -15,10 +15,11 @@ verSueltos = input.bool(true, "Giros sueltos ($)", group = grpB)
 verLineas = input.bool(true, "Líneas de tendencia ($$$)", group = grpB)
 verBarridos = input.bool(true, "Mantener niveles ya barridos", group = grpB)
 maxNiveles = input.int(12, "Máximo de niveles activos por lado", minval = 2, maxval = 30, group = grpB)
+maxBarridos = input.int(10, "Máximo de barridas visibles", minval = 0, maxval = 40, group = grpB)
 grpC = "Colores"
 colAlta = input.color(#ff5c6c, "Liquidez arriba", group = grpC)
 colBaja = input.color(#2fbf71, "Liquidez abajo", group = grpC)
-colBar = input.color(#6f7a86, "Barrida", group = grpC)
+transBar = input.int(70, "Transparencia de las barridas", minval = 0, maxval = 95, group = grpC)
 
 type Liq
     float p1
@@ -41,6 +42,7 @@ datos(int n) =>
 
 var array<Liq> arriba = array.new<Liq>()
 var array<Liq> abajo = array.new<Liq>()
+var array<Liq> barridas = array.new<Liq>()
 var array<float> hP = array.new<float>()
 var array<int> hT = array.new<int>()
 var array<float> lP = array.new<float>()
@@ -64,10 +66,10 @@ pintar(Liq k) =>
         label.delete(k.lb)
     bool visible = k.inclinada ? verLineas : fuerte ? verIguales : verSueltos
     if visible
-        k.ln := line.new(k.t1, k.p1, k.t2, k.p2, xloc = xloc.bar_time, extend = extend.right, color = color.new(c, fuerte ? 15 : 60), width = fuerte ? 2 : 1, style = fuerte ? line.style_solid : line.style_dotted)
-        int tTxt = (k.t1 + k.t2) / 2
-        float pTxt = (k.p1 + k.p2) / 2
-        k.lb := label.new(tTxt, pTxt, fuerte ? "$$$" : "$", xloc = xloc.bar_time, style = k.lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = c, size = size.small)
+        k.ln := line.new(k.t1, k.p1, time, precioEn(k, time), xloc = xloc.bar_time, extend = extend.none, color = color.new(c, fuerte ? 10 : 55), width = fuerte ? 2 : 1, style = line.style_solid)
+        int tTxt = k.inclinada ? (k.t1 + k.t2) / 2 : k.t1
+        float pTxt = precioEn(k, tTxt)
+        k.lb := label.new(tTxt, pTxt, fuerte ? "$$$" : "$", xloc = xloc.bar_time, style = k.lado > 0 ? label.style_label_down : label.style_label_up, color = color(na), textcolor = color.new(c, fuerte ? 0 : 45), size = fuerte ? size.small : size.tiny)
 
 recortar(array<Liq> z) =>
     while z.size() > maxNiveles
@@ -132,21 +134,25 @@ revisar(array<Liq> z, int lado) =>
             bool barrido = lado > 0 ? high > p : low < p
             if barrido and time > k.t2
                 cuenta += 1
-                if not na(k.ln) and verBarridos
-                    line.set_x2(k.ln, time)
-                    line.set_y2(k.ln, p)
-                    line.set_extend(k.ln, extend.none)
-                    line.set_color(k.ln, color.new(colBar, 40))
-                    line.set_style(k.ln, line.style_dashed)
+                if not na(k.ln) and verBarridos and maxBarridos > 0
+                    line.set_xy2(k.ln, time, p)
+                    line.set_color(k.ln, color.new(colorDe(lado), transBar))
                     line.set_width(k.ln, 1)
                     if not na(k.lb)
-                        label.set_textcolor(k.lb, colBar)
+                        label.set_textcolor(k.lb, color.new(colorDe(lado), transBar))
+                    barridas.push(k)
+                    while barridas.size() > maxBarridos
+                        Liq viejo = barridas.shift()
+                        line.delete(viejo.ln)
+                        label.delete(viejo.lb)
                 else
                     if not na(k.ln)
                         line.delete(k.ln)
                     if not na(k.lb)
                         label.delete(k.lb)
                 z.remove(i)
+            else if not na(k.ln)
+                line.set_xy2(k.ln, time, p)
     cuenta
 
 if not na(atrTf)
