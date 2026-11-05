@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.9
+// @version      5.10
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -954,7 +954,7 @@
   let dibujando = false, dibPendiente = null;
   const GX_COL = { barP: '#2fbf72', barN: '#ff5c6d', linC: '#2fbf73', linP: '#ff5c6e', hvl: '#29c5f7', marca: '#ffb021', marcaAb: '#9d8cf0', bandaV: '#2fbf74', bandaR: '#ff5c6f' };
   const GX_MIOS = Object.values(GX_COL);
-  let gxVista = null, gxClave = '', gxCv = null, gxOffsetPrevio = null;
+  let gxSymUlt = null, gxVista = null, gxClave = '', gxCv = null, gxOffsetPrevio = null;
   // v5.9: el perfil se pinta en una capa propia sobre el gráfico: no crea dibujos en TradingView, no se guarda en la plantilla y sigue zoom y desplazamiento
   function gxPintaCapa(cv, ch, v, r) {
     const ts = ch.getTimeScale(), ps = ch.getPanes()[0].getMainSourcePriceScale(), W = r.width, H = r.height, dpr = window.devicePixelRatio || 1;
@@ -975,7 +975,7 @@
       const e = v.etiq[x.k]; if (e && !usadosE.some((u) => Math.abs(u - y) < 9)) { usadosE.push(y); let xt = b0 + largo + 14; c.font = '10px ' + FUENTE; if (e.t) { c.fillStyle = e.col; c.globalAlpha = 0.45 + 0.55 * x.f; c.fillText(e.t, xt, y); c.globalAlpha = 1; xt += c.measureText(e.t).width + 12; }
         c.font = '9px ' + FUENTE; for (const m of e.m) { c.fillStyle = /^Ab\d/.test(m) ? GX_COL.marcaAb : GX_COL.marca; c.fillText(m, xt, y); xt += c.measureText(m).width + 8; } } }
     if (v.hvl != null && v.hvlTxt) { const y = Y(v.hvl); if (dentro(y)) { c.font = '9px ' + FUENTE; c.fillStyle = '#b6bec7'; c.fillText(String(Math.round(v.hvl)), xa, y - 5); c.beginPath(); c.arc(b0 + 4, y, 4, 0, 7); c.fillStyle = v.S > v.hvl ? GX_COL.linC : GX_COL.linP; c.fill(); c.font = '10px ' + FUENTE; c.fillStyle = GX_COL.hvl; c.fillText(v.hvlTxt, b0 + 16, y); } }
-    if (v.viejo) { c.font = '600 12px system-ui,sans-serif'; c.fillStyle = '#ffd166'; c.fillText('Datos viejos: pulsa F5 en la pestaña de Barchart', 12, H - 18); }
+    if (v.viejo) { c.font = '600 12px system-ui,sans-serif'; c.fillStyle = '#ffd166'; c.fillText('Datos viejos: pulsa F5 en TODAS las pestañas de Barchart', 12, 118); }
   }
   // Deja sitio a la derecha del precio al encender; al apagar devuelve el margen que había
   function gxEspacio(ch, on) { try { const ts = ch.getTimeScale(); if (on) { if (gxOffsetPrevio === null && ts.rightOffset() * ts.barSpacing() < ts.width() * 0.3) { gxOffsetPrevio = ts.rightOffset(); ts.setRightOffset(Math.round(ts.width() * 0.3 / ts.barSpacing())); } } else if (gxOffsetPrevio !== null) { ts.setRightOffset(gxOffsetPrevio); gxOffsetPrevio = null; } } catch (e) {} }
@@ -985,6 +985,7 @@
     const ch = api.activeChart(), w = document.querySelector('.chart-gui-wrapper'); if (!w) return;
     if (!gxCv || !gxCv.isConnected) { gxCv = document.createElement('canvas'); gxCv.id = 'ng-gex-capa'; gxCv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5;'; w.appendChild(gxCv); gxClave = ''; }
     const r = w.getBoundingClientRect(), ts = ch.getTimeScale(), pr = ch.getPanes()[0].getMainSourcePriceScale().getVisiblePriceRange(), sym = ch.symbol();
+    if (sym !== gxSymUlt) { gxSymUlt = sym; dibujar(false); } // al cambiar de símbolo limpia y redibuja en seguida
     const v = gxVista && gxVista.sym === sym ? gxVista : null;
     const clave = [Math.round(r.width), Math.round(r.height), ts.rightOffset(), ts.barSpacing(), pr && pr.from, pr && pr.to, !!v].join('|');
     if (clave !== gxClave) { gxClave = clave; gxPintaCapa(gxCv, ch, v, r); }
