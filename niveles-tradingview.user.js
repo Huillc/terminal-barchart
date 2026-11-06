@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.11
+// @version      5.12
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -79,7 +79,7 @@
     // flip: precio hipotético donde la gamma total cambia de signo (se reprecia la cadena)
     const tot = (s) => { let t = 0; for (const x of f) t += bsGamma(s, x.strikePrice, Math.max(1, dte(x.expirationDate, hoy)) / 365, ivDe(x)) * x.openInterest * (x.optionType === 'Call' ? 1 : -1); return t; };
     let flip = null, prev = null;
-    const rf = rangoFlip || 0.05; // v5.11: el perfil GEX busca el HVL en ±12 %; el plan sigue en ±5 %
+    const rf = rangoFlip || 0.15; // v5.12: flip y HVL se buscan en ±15 %; si no aparece, el tipo de día usa la gamma neta
     for (let s = S * (1 - rf); s <= S * (1 + rf); s += S * 0.0005) {
       const v = tot(s);
       if (prev && (prev[1] < 0) !== (v < 0) && v !== prev[1]) {
@@ -92,6 +92,7 @@
     return {
       vencs, oi: f.reduce((a, x) => a + x.openInterest, 0),
       flip: flip == null ? null : +flip.toFixed(2),
+      neta: tot(S),
       muro: muro ? muro[0] : null, iman: iman ? iman[0] : null,
     };
   }
@@ -102,7 +103,7 @@
     const calc = (L) => { const n = {}, co = {}, po = {}, ag = {};
       for (const x of L) { if (!(x.openInterest > 0) || !(x.gamma > 0) || Math.abs(x.strikePrice / S - 1) > 0.1) continue; const g = x.gamma * x.openInterest * 100 * S * S * 0.01, c = x.optionType === 'Call', k = x.strikePrice;
         n[k] = (n[k] || 0) + (c ? g : -g); ag[k] = (ag[k] || 0) + g; const d = c ? co : po; d[k] = (d[k] || 0) + x.openInterest; }
-      const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy, 0.12);
+      const A = Object.entries(n).map(([k, v]) => ({ k: +k, g: Math.round(v) })), m = mapa(L, S, hoy, 0.15);
       // v5.7: marcas por strike (definición propia; se calculan con OI y gamma de Barchart)
       const ks = Object.keys(n).map(Number), top = (f) => { let b = null, bv = -Infinity; for (const k of ks) { const v = f(k); if (v > bv) { bv = v; b = k; } } return b; }, oc = (k) => co[k] || 0, op = (k) => po[k] || 0;
       const M = ks.length ? { COI: top(oc), POI: top(op), nCOI: top((k) => oc(k) - op(k)), nPOI: top((k) => op(k) - oc(k)), AbOI: top((k) => oc(k) + op(k)), Ab: ks.slice().sort((p, q) => ag[q] - ag[p]).slice(0, 3) } : null;
@@ -525,7 +526,7 @@
       const px = it.cfd, p = PASO[sym], N = niveles(sym, it, dd), s = it.semana || {};
       if (!px || !N.length) return null;
       const arriba = N.filter((x) => x.v > px), abajo = N.filter((x) => x.v < px).reverse();
-      const modo = s.flip ? (it.spot >= s.flip ? 'FRENADO' : 'AMPLIO') : null;
+      const modo = s.flip ? (it.spot >= s.flip ? 'FRENADO' : 'AMPLIO') : s.neta != null && s.neta !== 0 ? (s.neta > 0 ? 'FRENADO' : 'AMPLIO') : null;
       const R1 = arriba[0], R2 = arriba[1], S1 = abajo[0], S2 = abajo[1], out = [];
       const obj = (desde, lado, sig) => { const tope = desde + lado * p.obj; return sig && (lado > 0 ? sig.v < tope : sig.v > tope) ? { v: sig.v, n: sig.n } : { v: tope, n: p.obj + ' ' + p.u }; };
       // v2.1: el rechazo del muro NO funcionó (2024–26: el muro rebota 32–47 % vs 52–62 % un nivel cualquiera).
@@ -704,7 +705,7 @@
           : Pn.señal && okVent ? `<b class="up" style="font-size:15px">✅ AHORA PUEDES ENTRAR · COMPRA ~${q && q.k ? f(dd.Q.QQQ.lastPrice * q.k, 0) : '—'}</b> (antes de las ${limaDeNY(cierreHoy() - 1)} Lima) · salida: primer cierre sobre ${q && q.k ? f(Pn.prevHigh * q.k, 0) : '—'} o a los 5 días · <span class="m">71 %, +0,31 %/op</span>`
           : Pn.señal && abierto ? `<b class="am">◐ SEÑAL EN FORMACIÓN · todavía NO entres</b> <span class="m">— se confirma entre ${limaDeNY(cierreHoy() - 15)} y ${limaDeNY(cierreHoy() - 1)} Lima</span>`
           : `<b class="m">○ AÚN NO</b> <span class="m">— RSI2 ${Pn.rsi.toFixed(1)} (necesita &lt; 10), ${Pn.ok.tend ? 'sobre' : 'bajo'} media 200, crédito ${Pn.ok.cred ? 'sano' : 'débil'}</span>`) + '</div>';
-        if (Pn.señal && okVent) { autos++; avisar('pn_' + hoy, '✅ NAS100: AHORA PUEDES ENTRAR (rebote de pánico)', 'compra al cierre · salida en el primer cierre sobre el máximo de ayer o a los 5 días'); anotar({ id: 'pn_' + hoy, tipo: 'panico', dia: hoy, ent: dd.Q.QQQ.lastPrice, prevHigh: Pn.prevHigh }); } }
+        if (Pn.señal && okVent) { autos++; avisar('pn_' + hoy, '✅ NAS100: AHORA PUEDES ENTRAR (rebote de pánico)', 'compra al cierre · salida en el primer cierre sobre el máximo de ayer o a los 5 días'); } }
       for (const sym of ['QQQ', 'DIA']) { const X = CD[sym]; if (!X) continue; const { c, k, nm, d } = X;
         const bajo = !c.ok.tend, ven = abierto && completa && tm >= 750 && tm <= 870, antes = abierto && completa && tm < 750;
         m4 += `<div style="margin:3px 0;padding:4px 8px;border-radius:6px;border:1px solid ${bajo && ven ? '#2fbf71' : '#2a3340'};background:${bajo && ven ? '#0c2a1b' : '#0b1118'}"><b>Motor 3 · Tarde bajista · ${nm}</b> · ` +
@@ -782,9 +783,9 @@
           + fila('Tendencia', c.estado ? '—' : (c.ok.tend ? 'Sobre media 200' : 'Bajo media 200'), c.estado ? '' : (c.ok.tend ? 'v-u' : 'v-d'))
           + fila('VWAP', V && ab ? `${V.lado > 0 ? 'Sobre' : 'Bajo'} ${Math.abs(V.pct).toFixed(2)} %` : '—', V && ab ? (V.lado > 0 ? 'v-u' : 'v-d') : '')
           + fila('Tipo de día', Es && Es.modo ? (Es.modo === 'AMPLIO' ? 'Amplio' : 'Frenado') : '—')
-          + fila('HVL', gx && gx.hvl != null && k ? `${ref > gx.hvl * k ? 'Sobre' : 'Bajo'} ${f(gx.hvl * k, d)}` : '—', gx && gx.hvl != null && k ? (ref > gx.hvl * k ? 'v-u' : 'v-d') : '')
-          + fila('Arriba', arr ? `${f(arr.v, d)} <small>${arr.n}</small>` : '—')
-          + fila('Abajo', abj ? `${f(abj.v, d)} <small>${abj.n}</small>` : '—')
+          + fila(gexModo() === 'acum' ? 'HVL acum.' : 'HVL 1er venc.', gx && gx.hvl != null && k ? `${ref > gx.hvl * k ? 'Sobre' : 'Bajo'} ${f(gx.hvl * k, d)}` : '—', gx && gx.hvl != null && k ? (ref > gx.hvl * k ? 'v-u' : 'v-d') : '')
+          + fila(gexModo() === 'acum' ? 'Arriba (acum.)' : 'Arriba (1er venc.)', arr ? `${f(arr.v, d)} <small>${arr.n}</small>` : '—')
+          + fila(gexModo() === 'acum' ? 'Abajo (acum.)' : 'Abajo (1er venc.)', abj ? `${f(abj.v, d)} <small>${abj.n}</small>` : '—')
           + '</table></section>';
       }
       const claseB = E.length ? 'ent' : A.length ? 'ate' : 'esp';
@@ -866,7 +867,7 @@
               anotar({ id: 'ctx_' + ny().dia, tipo: 'contexto', dia: ny().dia, d: C.d, ent: C.ent, sl: C.sl, tp: C.tp, k: it.ratio }); }
             else h += `<div class="sem"><b class="m">○ Contexto 10:30</b> <span class="m">${C.estado}</span></div>`;
             if (Pn.señal) { h += `<div class="sem si"><b class="up">● REBOTE DE PÁNICO ACTIVO</b> · comprar al cierre (${limaDeNY(cierreHoy() - 5)} Lima) · salir en el primer cierre sobre ${f(Pn.prevHigh * it.ratio, 0)} o a los 5 días<br><span class="m">RSI2 ${Pn.rsi.toFixed(1)} · sobre la media de 200 · crédito sano · 2007–2026: 71 % acierto, +0,31 %/op</span><span class="pr ok">probado 19 años</span></div>`;
-              if (mercadoAbierto() && ny().min >= cierreHoy() - 15) anotar({ id: 'pn_' + ny().dia, tipo: 'panico', dia: ny().dia, ent: dd.Q.QQQ.lastPrice, prevHigh: Pn.prevHigh }); }
+              }
             else if (Pn.rsi != null) h += `<div class="sem ${Pn.cerca ? 'cer' : ''}"><b class="${Pn.cerca ? 'am' : 'm'}">${Pn.cerca ? '◐ Pánico cerca' : '○ Rebote de pánico'}</b> <span class="m">RSI2 ${Pn.rsi.toFixed(1)} (necesita &lt; 10) · ${Pn.ok.tend ? 'sobre' : 'bajo'} media 200 · crédito ${Pn.ok.cred ? 'sano' : 'débil'} (${(Pn.cred * 100).toFixed(1)} %)</span></div>`;
           } else h += `<div class="sem"><b class="m">○ Sin señal probada para ${it.nombre}</b> <span class="m">· solo escenarios en prueba (riesgo reducido)</span></div>`;
           // escenarios
@@ -879,7 +880,7 @@
         }
         const D = evaluarDiario(dd), hechos = D.filter((x) => x.r != null);
         const txt = (tipo) => { const H = hechos.filter((x) => x.tipo === tipo); return H.length ? `${H.length} · ${Math.round(H.filter((x) => x.r > 0).length / H.length * 100)} % ganadas · media ${(H.reduce((a, x) => a + x.r, 0) / H.length).toFixed(2)}${tipo === 'panico' || tipo === 'caida' || tipo === 'tarde' ? ' %' : ' R'}` : 'aún sin resultados'; };
-        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: ${txt('panico')} · caída rápida: ${txt('caida')} · tarde bajista: ${txt('tarde')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
+        h += `</div><div class="m" style="margin-top:6px">📒 Diario en vivo — impulso 1ª hora: ${txt('impulso')} · contexto 10:30: ${txt('contexto')} · pánico: se mide en el Terminal · caída rápida: ${txt('caida')} · tarde bajista: ${txt('tarde')} · Capital para el tamaño: <input id="cap" type="number" placeholder="FALTA" value="${cap || ''}"> USD · *Imán = gamma más negativa, NO probado que atraiga. No es asesoría: datos para que decidas tú.</div>`;
         const full = h.slice(h0.length); let v = '';
         try { v = vistaHTML(data, dd); } catch (e) { v = `<div class="v-b v-esp"><strong>No se pudo armar el resumen.</strong><span>Abre Ver detalle.</span></div>`; }
         h = h0 + v + (gmGet('ng_detalle', false) ? full : '');
