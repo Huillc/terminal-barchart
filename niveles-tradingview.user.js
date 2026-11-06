@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plan del Día + Niveles Gamma → TradingView
 // @namespace    terminal-barchart
-// @version      5.12
+// @version      5.13
 // @description  PLAN DEL DÍA en Barchart (fases por hora de Lima, modo rebote/ruptura por gamma, señales probadas: contexto 10:30 y rebote de pánico con crédito, escenarios a 200 pts, diario automático) + niveles gamma dibujados solos en TradingView. PC y Firefox del celular.
 // @match        https://www.barchart.com/*
 // @match        https://www.tradingview.com/*
@@ -797,6 +797,7 @@
       return `<div class="v-b v-${claseB}"><strong>${tituloB}</strong>${extra.join('')}</div><div class="v-g3">${cols}</div>`;
     }
     function pintar(estado) {
+      host.style.display = 'none'; return; // v5.13: Plan del Día retirado de Barchart; los niveles de TradingView siguen
       const abierto = gmGet('ng_abierto', true), data = gmGet('ng_data', null), dd = gmGet('ng_dia', null), F = fase();
       // v3.4: plegado = botón chico abajo a la izquierda, para no tapar el menú de Barchart
       host.style.cssText = abierto ? 'position:fixed;left:0;right:0;top:0;z-index:2147483646;' : 'position:fixed;left:10px;bottom:10px;z-index:2147483646;';
